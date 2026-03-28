@@ -14,7 +14,7 @@ use uuid::Uuid;
 const DEFAULT_FOCUS_MINUTES: i64 = 50;
 const DEFAULT_BREAK_MINUTES: i64 = 10;
 const DEFAULT_SYNC_SERVER_URL: &str = "http://localhost:8787";
-const DEFAULT_DEVICE_NAME: &str = "데일리 체크 macOS";
+const DEFAULT_DEVICE_NAME: &str = "Daily Check macOS";
 
 #[derive(Clone)]
 pub struct AppState {

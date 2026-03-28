@@ -27,8 +27,8 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
 
   TrayIconBuilder::with_id("routine-tray")
     .menu(&menu)
-    .title("체크")
-    .tooltip("데일리 체크")
+    .title("Daily")
+    .tooltip("Daily Check")
     .show_menu_on_left_click(false)
     .on_menu_event(|app, event| match event.id().0.as_str() {
       "open" | "today" => show_main_window(app),

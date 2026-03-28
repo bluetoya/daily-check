@@ -1284,7 +1284,7 @@ function App() {
     return (
       <main className="shell auth-shell">
         <section className="auth-card panel">
-          <h1>데일리 체크</h1>
+          <h1>Daily Check</h1>
           <p className="supporting">로컬 저장소를 준비하고 있습니다.</p>
         </section>
       </main>
@@ -1295,7 +1295,7 @@ function App() {
     return (
       <main className="shell auth-shell">
         <section className="auth-card panel">
-          <h1>데일리 체크</h1>
+          <h1>Daily Check</h1>
           <p className="supporting">동기화 키를 입력해 앱을 시작하세요.</p>
 
           <label className="field">

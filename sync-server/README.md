@@ -9,7 +9,7 @@
 3. `.env`는 절대 저장소에 커밋하지 않습니다.
 
 ```bash
-cp .env.development.example .env.development
+cp .env.development.example .env.development.local
 ```
 
 기본값 예시:
@@ -21,7 +21,9 @@ HOST=localhost
 CORS_ORIGIN=http://localhost:1420,tauri://localhost
 ```
 
-배포용 예시는 `.env.production.example`을 참고하세요.
+`.env.development.local`은 로컬에서만 쓰는 비밀 설정 파일이고, Git에는 올리지 않습니다.
+
+배포용 예시는 `.env.production.example`을 참고하고, 실제 비밀번호는 배포 환경의 secret로 주입하는 쪽을 권장합니다.
 
 ## 실행
 
@@ -42,6 +44,7 @@ http://localhost:8787
 - 인터넷에 공개하려면 `HOST`, `CORS_ORIGIN`, HTTPS 프록시 구성을 따로 잡아야 합니다.
 - 현재 인증은 sync key 기반이라, 공개 서비스로 키우려면 추가 인증/제한 장치가 필요합니다.
 - `APP_ENV=production`으로 실행하면 `.env.production`, `.env.production.local`도 함께 읽습니다.
+- 저장소에 비밀번호를 암호화해서 넣고 싶다면 `sops + age` 같은 방식을 쓸 수 있지만, 개인용 로컬 개발에는 `.env.development.local` + Git 무시가 더 단순하고 안전합니다.
 
 ## 엔드포인트
 
