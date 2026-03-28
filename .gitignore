@@ -1,0 +1,15 @@
+node_modules
+dist
+.DS_Store
+target
+src-tauri/target
+sync-server/node_modules
+sync-server/dist
+.env
+.env.*
+!.env.example
+!.env*.example
+sync-server/.env
+sync-server/.env.*
+!sync-server/.env.example
+!sync-server/.env*.example

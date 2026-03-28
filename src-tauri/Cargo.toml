@@ -1,0 +1,23 @@
+[package]
+name = "routine_bridge"
+version = "0.1.0"
+description = "Personal routine tracker with weekly grid and tray access"
+authors = ["Daily Check"]
+edition = "2021"
+
+[lib]
+name = "routine_bridge_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+anyhow = "1"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+rusqlite = { version = "0.31", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = ["tray-icon"] }
+time = { version = "0.3", features = ["formatting", "parsing"] }
+uuid = { version = "1", features = ["v4", "serde"] }

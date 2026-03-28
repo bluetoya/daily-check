@@ -1,0 +1,30 @@
+{
+  "name": "routine-bridge",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host localhost --port 1420 --strictPort",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "bundle:mac": "tauri build",
+    "audit:public": "bash scripts/public_repo_audit.sh",
+    "clean:public": "node scripts/clean_public_artifacts.mjs",
+    "sync:dev": "npm --prefix sync-server run dev",
+    "sync:build": "npm --prefix sync-server run build"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.0.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0",
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.1",
+    "typescript": "^5.5.4",
+    "vite": "^5.4.2"
+  }
+}
