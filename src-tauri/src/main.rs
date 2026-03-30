@@ -1,6 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-  routine_bridge_lib::run();
+  daily_check_lib::run();
 }
 

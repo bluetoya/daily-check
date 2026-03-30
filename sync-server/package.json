@@ -1,5 +1,5 @@
 {
-  "name": "routine-bridge-sync-server",
+  "name": "daily-check-sync-server",
   "private": true,
   "version": "0.1.0",
   "type": "module",

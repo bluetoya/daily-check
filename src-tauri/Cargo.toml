@@ -1,12 +1,12 @@
 [package]
-name = "routine_bridge"
+name = "daily_check"
 version = "0.1.0"
 description = "Personal routine tracker with weekly grid and tray access"
 authors = ["Daily Check"]
 edition = "2021"
 
 [lib]
-name = "routine_bridge_lib"
+name = "daily_check_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

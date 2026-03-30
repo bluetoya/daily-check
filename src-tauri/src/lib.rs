@@ -62,7 +62,7 @@ pub fn run() {
   tauri::Builder::default()
     .setup(|app| {
       let mut db_path = app.path().app_data_dir()?;
-      db_path.push("routine-bridge.sqlite3");
+      db_path.push("daily-check.sqlite3");
       db::init_database(&db_path)?;
       app.manage(AppState { db_path });
 

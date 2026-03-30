@@ -1,6 +1,6 @@
 <resources xmlns:tools="http://schemas.android.com/tools">
     <!-- Base application theme. -->
-    <style name="Theme.routine_bridge" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+    <style name="Theme.daily_check" parent="Theme.MaterialComponents.DayNight.NoActionBar">
         <!-- Customize your theme here. -->
     </style>
 </resources>
