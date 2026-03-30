@@ -4,6 +4,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
+  collections::HashMap,
   fs,
   path::{Path, PathBuf},
   time::{SystemTime, UNIX_EPOCH},
@@ -384,6 +385,29 @@ pub fn sync_now(state: State<AppState>) -> Result<SyncActionResponse, String> {
   })
 }
 
+fn with_write_transaction<T, F>(conn: &Connection, operation: F) -> Result<T, String>
+where
+  F: FnOnce(&Connection) -> Result<T, String>,
+{
+  conn
+    .execute_batch("BEGIN IMMEDIATE")
+    .map_err(|error| error.to_string())?;
+
+  match operation(conn) {
+    Ok(value) => {
+      if let Err(error) = conn.execute_batch("COMMIT") {
+        let _ = conn.execute_batch("ROLLBACK");
+        return Err(error.to_string());
+      }
+      Ok(value)
+    }
+    Err(error) => {
+      let _ = conn.execute_batch("ROLLBACK");
+      Err(error)
+    }
+  }
+}
+
 #[tauri::command]
 pub fn create_routine(input: RoutineInput, state: State<AppState>) -> Result<AppSnapshot, String> {
   let conn = open_connection(&state.db_path).map_err(|error| error.to_string())?;
@@ -391,28 +415,30 @@ pub fn create_routine(input: RoutineInput, state: State<AppState>) -> Result<App
   let payload = sanitize_routine_input(input)?;
   let id = Uuid::new_v4().to_string();
 
-  conn
-    .execute(
-      "INSERT INTO routines (
-        id, title, frequency, monthly_day, weekday_mask, reminder, focus_minutes, break_minutes,
-        accent, is_active, created_at, updated_at, deleted_at
-      ) VALUES (?1, ?2, ?3, NULL, ?4, ?5, ?6, ?7, ?8, 1, ?9, ?9, NULL)",
-      params![
-        id,
-        payload.title,
-        payload.frequency,
-        payload.weekday_mask,
-        payload.reminder,
-        DEFAULT_FOCUS_MINUTES,
-        DEFAULT_BREAK_MINUTES,
-        payload.accent,
-        now
-      ],
-    )
-    .map_err(|error| error.to_string())?;
+  with_write_transaction(&conn, |conn| {
+    conn
+      .execute(
+        "INSERT INTO routines (
+          id, title, frequency, monthly_day, weekday_mask, reminder, focus_minutes, break_minutes,
+          accent, is_active, created_at, updated_at, deleted_at
+        ) VALUES (?1, ?2, ?3, NULL, ?4, ?5, ?6, ?7, ?8, 1, ?9, ?9, NULL)",
+        params![
+          id,
+          payload.title,
+          payload.frequency,
+          payload.weekday_mask,
+          payload.reminder,
+          DEFAULT_FOCUS_MINUTES,
+          DEFAULT_BREAK_MINUTES,
+          payload.accent,
+          now
+        ],
+      )
+      .map_err(|error| error.to_string())?;
 
-  queue_outbox(&conn, "routine", &id, "create", &payload).map_err(|error| error.to_string())?;
-  load_snapshot(&conn).map_err(|error| error.to_string())
+    queue_outbox(conn, "routine", &id, "create", &payload).map_err(|error| error.to_string())?;
+    load_snapshot(conn).map_err(|error| error.to_string())
+  })
 }
 
 #[tauri::command]
@@ -430,31 +456,33 @@ pub fn update_routine(
     accent: input.accent,
   })?;
 
-  conn
-    .execute(
-      "UPDATE routines
-       SET title = ?2,
-           frequency = ?3,
-           weekday_mask = ?4,
-           monthly_day = NULL,
-           reminder = ?5,
-           accent = ?6,
-           updated_at = ?7
-       WHERE id = ?1 AND deleted_at IS NULL",
-      params![
-        input.id,
-        payload.title,
-        payload.frequency,
-        payload.weekday_mask,
-        payload.reminder,
-        payload.accent,
-        now
-      ],
-    )
-    .map_err(|error| error.to_string())?;
+  with_write_transaction(&conn, |conn| {
+    conn
+      .execute(
+        "UPDATE routines
+         SET title = ?2,
+             frequency = ?3,
+             weekday_mask = ?4,
+             monthly_day = NULL,
+             reminder = ?5,
+             accent = ?6,
+             updated_at = ?7
+         WHERE id = ?1 AND deleted_at IS NULL",
+        params![
+          input.id,
+          payload.title,
+          payload.frequency,
+          payload.weekday_mask,
+          payload.reminder,
+          payload.accent,
+          now
+        ],
+      )
+      .map_err(|error| error.to_string())?;
 
-  queue_outbox(&conn, "routine", &input.id, "update", &payload).map_err(|error| error.to_string())?;
-  load_snapshot(&conn).map_err(|error| error.to_string())
+    queue_outbox(conn, "routine", &input.id, "update", &payload).map_err(|error| error.to_string())?;
+    load_snapshot(conn).map_err(|error| error.to_string())
+  })
 }
 
 #[tauri::command]
@@ -462,27 +490,29 @@ pub fn delete_routine(routine_id: String, state: State<AppState>) -> Result<AppS
   let conn = open_connection(&state.db_path).map_err(|error| error.to_string())?;
   let now = current_timestamp();
 
-  conn
-    .execute(
-      "UPDATE routines
-       SET is_active = 0,
-           deleted_at = ?2,
-           updated_at = ?2
-       WHERE id = ?1 AND deleted_at IS NULL",
-      params![routine_id, now],
+  with_write_transaction(&conn, |conn| {
+    conn
+      .execute(
+        "UPDATE routines
+         SET is_active = 0,
+             deleted_at = ?2,
+             updated_at = ?2
+         WHERE id = ?1 AND deleted_at IS NULL",
+        params![routine_id, now],
+      )
+      .map_err(|error| error.to_string())?;
+
+    queue_outbox(
+      conn,
+      "routine",
+      &routine_id,
+      "delete",
+      &json!({ "deletedAt": now }),
     )
     .map_err(|error| error.to_string())?;
 
-  queue_outbox(
-    &conn,
-    "routine",
-    &routine_id,
-    "delete",
-    &json!({ "deletedAt": now }),
-  )
-  .map_err(|error| error.to_string())?;
-
-  load_snapshot(&conn).map_err(|error| error.to_string())
+    load_snapshot(conn).map_err(|error| error.to_string())
+  })
 }
 
 #[tauri::command]
@@ -493,43 +523,46 @@ pub fn toggle_routine_check(
 ) -> Result<AppSnapshot, String> {
   let conn = open_connection(&state.db_path).map_err(|error| error.to_string())?;
   let now = current_timestamp();
-  let exists = conn
-    .query_row(
-      "SELECT 1 FROM routine_checks WHERE routine_id = ?1 AND check_date = ?2",
-      params![routine_id, date],
-      |_| Ok(true),
-    )
-    .optional()
-    .map_err(|error| error.to_string())?
-    .unwrap_or(false);
 
-  if exists {
-    conn
-      .execute(
-        "DELETE FROM routine_checks WHERE routine_id = ?1 AND check_date = ?2",
+  with_write_transaction(&conn, |conn| {
+    let exists = conn
+      .query_row(
+        "SELECT 1 FROM routine_checks WHERE routine_id = ?1 AND check_date = ?2",
         params![routine_id, date],
+        |_| Ok(true),
       )
-      .map_err(|error| error.to_string())?;
-  } else {
-    conn
-      .execute(
-        "INSERT INTO routine_checks (routine_id, check_date, updated_at) VALUES (?1, ?2, ?3)
-         ON CONFLICT(routine_id, check_date) DO UPDATE SET updated_at = excluded.updated_at",
-        params![routine_id, date, now],
-      )
-      .map_err(|error| error.to_string())?;
-  }
+      .optional()
+      .map_err(|error| error.to_string())?
+      .unwrap_or(false);
 
-  queue_outbox(
-    &conn,
-    "routine_check",
-    &routine_id,
-    "toggle",
-    &json!({ "date": date, "completed": !exists }),
-  )
-  .map_err(|error| error.to_string())?;
+    if exists {
+      conn
+        .execute(
+          "DELETE FROM routine_checks WHERE routine_id = ?1 AND check_date = ?2",
+          params![routine_id, date],
+        )
+        .map_err(|error| error.to_string())?;
+    } else {
+      conn
+        .execute(
+          "INSERT INTO routine_checks (routine_id, check_date, updated_at) VALUES (?1, ?2, ?3)
+           ON CONFLICT(routine_id, check_date) DO UPDATE SET updated_at = excluded.updated_at",
+          params![routine_id, date, now],
+        )
+        .map_err(|error| error.to_string())?;
+    }
 
-  load_snapshot(&conn).map_err(|error| error.to_string())
+    queue_outbox(
+      conn,
+      "routine_check",
+      &routine_id,
+      "toggle",
+      &json!({ "date": date, "completed": !exists }),
+    )
+    .map_err(|error| error.to_string())?;
+
+    load_snapshot(conn).map_err(|error| error.to_string())
+  })
 }
 
 #[tauri::command]
@@ -544,30 +577,32 @@ pub fn update_routine_timer(
   let conn = open_connection(&state.db_path).map_err(|error| error.to_string())?;
   let now = current_timestamp();
 
-  conn
-    .execute(
-      "UPDATE routines
-       SET focus_minutes = ?2,
-           break_minutes = ?3,
-           updated_at = ?4
-       WHERE id = ?1 AND deleted_at IS NULL",
-      params![input.id, input.focus_minutes, input.break_minutes, now],
+  with_write_transaction(&conn, |conn| {
+    conn
+      .execute(
+        "UPDATE routines
+         SET focus_minutes = ?2,
+             break_minutes = ?3,
+             updated_at = ?4
+         WHERE id = ?1 AND deleted_at IS NULL",
+        params![input.id, input.focus_minutes, input.break_minutes, now],
+      )
+      .map_err(|error| error.to_string())?;
+
+    queue_outbox(
+      conn,
+      "routine",
+      &input.id,
+      "update_timer",
+      &json!({
+        "focusMinutes": input.focus_minutes,
+        "breakMinutes": input.break_minutes
+      }),
     )
     .map_err(|error| error.to_string())?;
 
-  queue_outbox(
-    &conn,
-    "routine",
-    &input.id,
-    "update_timer",
-    &json!({
-      "focusMinutes": input.focus_minutes,
-      "breakMinutes": input.break_minutes
-    }),
-  )
-  .map_err(|error| error.to_string())?;
-
-  load_snapshot(&conn).map_err(|error| error.to_string())
+    load_snapshot(conn).map_err(|error| error.to_string())
+  })
 }
 
 fn sync_with_server(
@@ -1088,6 +1123,15 @@ fn ensure_outbox_has_local_snapshot(conn: &Connection) -> Result<()> {
 fn open_connection(db_path: &Path) -> Result<Connection> {
   let conn = Connection::open(db_path).context("failed to open local sqlite database")?;
   conn
+    .busy_timeout(std::time::Duration::from_secs(5))
+    .context("failed to set sqlite busy timeout")?;
+  conn
+    .pragma_update(None, "journal_mode", "WAL")
+    .context("failed to enable sqlite wal mode")?;
+  conn
+    .pragma_update(None, "synchronous", "NORMAL")
+    .context("failed to tune sqlite synchronous mode")?;
+  conn
     .pragma_update(None, "foreign_keys", "ON")
     .context("failed to enable foreign keys")?;
   Ok(conn)
@@ -1169,21 +1213,32 @@ fn load_snapshot(conn: &Connection) -> Result<AppSnapshot> {
     })
   })?;
 
-  let mut checks_stmt = conn.prepare(
-    "SELECT check_date
-     FROM routine_checks
-     WHERE routine_id = ?1
-     ORDER BY check_date ASC",
-  )?;
+  let mut routines = routine_rows.collect::<rusqlite::Result<Vec<_>>>()?;
+  let routine_indexes = routines
+    .iter()
+    .enumerate()
+    .map(|(index, routine)| (routine.id.clone(), index))
+    .collect::<HashMap<_, _>>();
 
-  let mut routines = Vec::new();
-  for routine in routine_rows {
-    let mut routine = routine?;
-    let completed_dates = checks_stmt
-      .query_map([routine.id.as_str()], |row| row.get::<_, String>(0))?
-      .collect::<rusqlite::Result<Vec<_>>>()?;
-    routine.completed_dates = completed_dates;
-    routines.push(routine);
+  if !routine_indexes.is_empty() {
+    let mut checks_stmt = conn.prepare(
+      "SELECT routine_checks.routine_id, routine_checks.check_date
+       FROM routine_checks
+       INNER JOIN routines ON routines.id = routine_checks.routine_id
+       WHERE routines.is_active = 1 AND routines.deleted_at IS NULL
+       ORDER BY routine_checks.routine_id ASC, routine_checks.check_date ASC",
+    )?;
+
+    let check_rows = checks_stmt.query_map([], |row| {
+      Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+
+    for check in check_rows {
+      let (routine_id, check_date) = check?;
+      if let Some(index) = routine_indexes.get(&routine_id) {
+        routines[*index].completed_dates.push(check_date);
+      }
+    }
   }
 
   let has_sync_key = get_setting(conn, "sync_key")?.is_some();

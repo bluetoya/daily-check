@@ -329,17 +329,17 @@ function App() {
   const [remainingSeconds, setRemainingSeconds] = useState(50 * 60);
   const [isTimerRunning, setIsTimerRunning] = useState(false);
   const [isWorking, setIsWorking] = useState(false);
+  const [now, setNow] = useState(() => new Date());
 
-  const today = useMemo(() => new Date(), []);
-  const weekDays = useMemo(() => buildWeekDays(today), [today]);
-  const todayKey = toLocalDateKey(today);
+  const weekDays = useMemo(() => buildWeekDays(now), [now]);
+  const todayKey = useMemo(() => toLocalDateKey(now), [now]);
   const routines = snapshot.routines;
   const activeRoutine = routines.find((routine) => routine.id === activeRoutineId) ?? routines[0] ?? null;
   const editorRoutine = routines.find((routine) => routine.id === editorRoutineId) ?? null;
   const currentTabLabel = tabs.find((tab) => tab.id === activeTab)?.label ?? "오늘";
   const todayRoutines = useMemo(
-    () => routines.filter((routine) => isScheduledOnWeekday(routine, today.getDay())),
-    [routines, today],
+    () => routines.filter((routine) => isScheduledOnWeekday(routine, now.getDay())),
+    [routines, now],
   );
 
   const todayCompletion = useMemo(() => {
@@ -350,6 +350,11 @@ function App() {
     const completed = todayRoutines.filter((routine) => routine.completedDates.includes(todayKey)).length;
     return Math.round((completed / todayRoutines.length) * 100);
   }, [todayRoutines, todayKey]);
+
+  useEffect(() => {
+    const interval = window.setInterval(() => setNow(new Date()), 60_000);
+    return () => window.clearInterval(interval);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;

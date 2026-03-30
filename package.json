@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "vite --host localhost --port 1420 --strictPort",
+    "dev": "vite --port 1420 --strictPort",
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
@@ -12,7 +12,14 @@
     "audit:public": "bash scripts/public_repo_audit.sh",
     "clean:public": "node scripts/clean_public_artifacts.mjs",
     "sync:dev": "npm --prefix sync-server run dev",
-    "sync:build": "npm --prefix sync-server run build"
+    "sync:build": "npm --prefix sync-server run build",
+    "android:init": "tauri android init",
+    "android:dev": "tauri android dev --open --target aarch64",
+    "android:build": "tauri android build --debug --target aarch64 --apk",
+    "android:build:release": "tauri android build --target aarch64 --apk --aab",
+    "android:devices": "$HOME/Library/Android/sdk/platform-tools/adb devices -l",
+    "android:install": "$HOME/Library/Android/sdk/platform-tools/adb install -r src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk",
+    "android:logcat": "$HOME/Library/Android/sdk/platform-tools/adb logcat | grep --line-buffered -E \"Daily Check|RustWebView|WryActivity|AndroidRuntime\""
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",

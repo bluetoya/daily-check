@@ -27,6 +27,77 @@ npm run tauri dev
 
 앱이 뜨면 원하는 동기화 키를 입력해 로컬에 저장하고, 서버가 없어도 오프라인 모드로 사용할 수 있습니다.
 
+## Android 확장 준비
+
+현재 코드베이스는 Android 대응을 염두에 두고 정리되어 있습니다.
+
+이미 반영된 것:
+
+- 하단 탭 기반 UI 유지
+- 데스크톱 전용 트레이 코드를 모바일에서 분리
+- Vite 개발 서버가 TAURI_DEV_HOST를 사용하도록 조정
+- Android용 실행 스크립트 추가
+
+Android로 실제 빌드하려면 추가로 필요합니다.
+
+- Android Studio
+- Android SDK / Platform-Tools / Build-Tools / NDK
+- JAVA_HOME, ANDROID_HOME, NDK_HOME 설정
+- rustup 설치와 Android Rust target 추가
+
+준비가 끝나면 아래 순서로 진행합니다.
+
+```bash
+npm run android:init
+npm run android:dev
+npm run android:build
+```
+
+현재 스크립트 기준:
+
+- `android:dev`: Android Studio를 열고 `arm64` 에뮬레이터나 실제 기기로 개발 실행
+- `android:build`: 실제 폰에 설치하기 쉬운 `arm64` 디버그 APK 생성
+- `android:build:release`: 배포용 `arm64` 릴리스 APK/AAB 생성
+
+디버그 APK 산출물은 보통 아래 경로에 생성됩니다.
+
+```
+src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk
+```
+
+릴리스 빌드는 서명이 추가로 필요할 수 있습니다.
+
+현재 저장소는 macOS 데스크톱 사용에는 바로 쓸 수 있지만, Android 빌드는 위 환경 준비가 먼저 필요합니다.
+
+실제 안드로이드 폰에서 테스트할 때는 아래 순서가 편합니다.
+
+1. 휴대폰에서 개발자 옵션과 USB 디버깅을 켭니다.
+2. USB로 연결한 뒤 기기 인식 확인:
+
+```bash
+npm run android:devices
+```
+
+3. 디버그 APK 빌드:
+
+```bash
+npm run android:build
+```
+
+4. 폰에 바로 설치:
+
+```bash
+npm run android:install
+```
+
+5. 앱 실행 중 문제가 있으면 로그 확인:
+
+```bash
+npm run android:logcat
+```
+
+기기가 연결되지 않은 상태에서 `android:install`을 실행하면 설치는 진행되지 않습니다.
+
 ## 동기화 포함 사용
 
 두 대 이상의 기기에서 동기화하려면 sync-server와 PostgreSQL이 필요합니다.

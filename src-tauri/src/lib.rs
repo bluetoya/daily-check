@@ -5,12 +5,14 @@ use db::{
   toggle_routine_check, unlock_app, update_routine, update_routine_timer, update_sync_server_url,
   AppState,
 };
+use tauri::Manager;
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 use tauri::{
   menu::{Menu, MenuItem},
   tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-  Manager,
 };
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn show_main_window(app: &tauri::AppHandle) {
   if let Some(window) = app.get_webview_window("main") {
     let _ = window.show();
@@ -19,6 +21,11 @@ fn show_main_window(app: &tauri::AppHandle) {
   }
 }
 
+#[cfg(any(target_os = "android", target_os = "ios"))]
+#[allow(dead_code)]
+fn show_main_window(_: &tauri::AppHandle) {}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn build_tray(app: &tauri::App) -> tauri::Result<()> {
   let open = MenuItem::with_id(app, "open", "앱 열기", true, None::<&str>)?;
   let today = MenuItem::with_id(app, "today", "오늘 화면으로 이동", true, None::<&str>)?;
@@ -59,9 +66,13 @@ pub fn run() {
       db::init_database(&db_path)?;
       app.manage(AppState { db_path });
 
-      let menu = tauri::menu::Menu::default(app.handle())?;
-      app.set_menu(menu)?;
-      build_tray(app)?;
+      #[cfg(not(any(target_os = "android", target_os = "ios")))]
+      {
+        let menu = tauri::menu::Menu::default(app.handle())?;
+        app.set_menu(menu)?;
+        build_tray(app)?;
+      }
+
       Ok(())
     })
     .invoke_handler(tauri::generate_handler![

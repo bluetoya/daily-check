@@ -45,6 +45,12 @@ for file in "${public_files[@]}"; do
   fi
 done
 
+for file in "${public_files[@]}"; do
+  if [[ "$file" =~ (^|/)(local\.properties|key\.properties|.*\.(jks|keystore))$ ]]; then
+    fail "안드로이드 로컬 설정 또는 서명 파일이 공개 대상에 포함되어 있습니다: $file"
+  fi
+done
+
 if ((${#public_files[@]})) && rg -n \
   "com\\.heejaeahn|authors = \\[\"heejaeahn\"\\]|DATABASE_URL=postgres://heejaeahn" \
   --glob '!scripts/public_repo_audit.sh' \
