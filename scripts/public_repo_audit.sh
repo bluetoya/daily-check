@@ -51,8 +51,9 @@ for file in "${public_files[@]}"; do
   fi
 done
 
-if ((${#public_files[@]})) && rg -n \
-  "com\\.heejaeahn|authors = \\[\"heejaeahn\"\\]|DATABASE_URL=postgres://heejaeahn" \
+current_user="${USER:-}"
+if [[ -n "$current_user" ]] && ((${#public_files[@]})) && rg -n \
+  "com\\.${current_user}|authors = \\[\"${current_user}\"\\]|DATABASE_URL=postgres://${current_user}" \
   --glob '!scripts/public_repo_audit.sh' \
   -- "${public_files[@]}" >/dev/null; then
   fail "개인 식별자 또는 로컬 사용자 정보가 남아 있습니다."
