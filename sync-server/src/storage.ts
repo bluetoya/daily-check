@@ -448,7 +448,7 @@ function normalizeTimestamp(input?: number | string) {
 
 function generateSyncKey() {
   const chunk = () => Math.random().toString(36).slice(2, 6).toUpperCase();
-  return `RT-${chunk()}-${chunk()}-${chunk()}`;
+  return `DC-${chunk()}-${chunk()}-${chunk()}`;
 }
 
 function normalizeRoutinePayload(payload: Record<string, unknown>) {
