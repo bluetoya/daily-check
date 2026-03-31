@@ -1,6 +1,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-  daily_check_lib::run();
+    daily_check_lib::run();
 }
-
