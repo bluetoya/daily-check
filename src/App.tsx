@@ -1,9 +1,19 @@
 import { invoke } from "@tauri-apps/api/core";
-import { Fragment, useEffect, useMemo, useState, type CSSProperties } from "react";
+import {
+  cancel,
+  isPermissionGranted,
+  pending,
+  requestPermission,
+  Schedule,
+  sendNotification,
+  type PermissionState,
+} from "@tauri-apps/plugin-notification";
+import { Fragment, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 
 type Frequency = "Daily" | "Weekdays" | "Weekends" | "CustomDays";
-type TabId = "today" | "weekly" | "pomodoro" | "routines" | "settings";
+type TabId = "today" | "weekly" | "stats" | "pomodoro" | "routines" | "settings";
 type TimerPhase = "focus" | "break";
+type NotificationPermissionStatus = PermissionState | "default" | "checking" | "unavailable";
 
 type Routine = {
   id: string;
@@ -41,6 +51,9 @@ type SyncKeyResponse = {
 type SyncActionResponse = {
   snapshot: AppSnapshot;
   message: string;
+  pushedCount: number;
+  pulledCount: number;
+  conflictCount: number;
 };
 
 type RoutineDraft = {
@@ -56,10 +69,45 @@ type TimerDraft = {
   breakMinutes: number;
 };
 
+type ReminderSpec = {
+  id: number;
+  title: string;
+  body: string;
+  schedule: Schedule;
+};
+
+type CompletionSummary = {
+  scheduled: number;
+  completed: number;
+  percent: number;
+};
+
+type RoutineStat = {
+  routine: Routine;
+  weekly: CompletionSummary;
+  monthly: CompletionSummary;
+  streak: number;
+};
+
+type SyncStatusTone = "idle" | "syncing" | "success" | "warning" | "error";
+
+type SyncStatus = {
+  tone: SyncStatusTone;
+  message: string;
+  pushedCount: number;
+  pulledCount: number;
+  conflictCount: number;
+};
+
 const weekdayLabels = ["일", "월", "화", "수", "목", "금", "토"];
+const ROUTINE_REMINDER_ID_BASE = 300_000_000;
+const ROUTINE_REMINDER_ID_RANGE = 200_000_000;
+const POMODORO_NOTIFICATION_ID_BASE = 700_000_000;
+const TEST_NOTIFICATION_ID = 700_000_100;
 const tabs: Array<{ id: TabId; label: string }> = [
   { id: "today", label: "오늘" },
   { id: "weekly", label: "주간 체크" },
+  { id: "stats", label: "통계" },
   { id: "pomodoro", label: "뽀모도로" },
   { id: "routines", label: "루틴" },
   { id: "settings", label: "설정" },
@@ -114,6 +162,26 @@ function buildWeekDays(anchor: Date) {
   });
 }
 
+function buildMonthDays(anchor: Date) {
+  const current = new Date(anchor);
+  current.setHours(12, 0, 0, 0);
+
+  const cursor = new Date(current.getFullYear(), current.getMonth(), 1, 12);
+  const days: string[] = [];
+
+  while (cursor <= current) {
+    days.push(toLocalDateKey(cursor));
+    cursor.setDate(cursor.getDate() + 1);
+  }
+
+  return days;
+}
+
+function dateFromKey(key: string) {
+  const [year, month, day] = key.split("-").map(Number);
+  return new Date(year, month - 1, day, 12);
+}
+
 function formatSeconds(totalSeconds: number) {
   const minutes = Math.floor(totalSeconds / 60)
     .toString()
@@ -127,7 +195,7 @@ function formatSeconds(totalSeconds: number) {
 
 function generateSyncKey() {
   const chunk = () => Math.random().toString(36).slice(2, 6).toUpperCase();
-  return `RT-${chunk()}-${chunk()}-${chunk()}`;
+  return `DC-${chunk()}-${chunk()}-${chunk()}`;
 }
 
 function createLocalId() {
@@ -163,6 +231,233 @@ function frequencyText(frequency: Frequency) {
 
 function reminderText(reminder: string) {
   return reminder ? reminder : "알림 끔";
+}
+
+function isNavigatorOnline() {
+  return typeof navigator === "undefined" ? true : navigator.onLine;
+}
+
+function buildInitialSyncStatus(): SyncStatus {
+  return {
+    tone: "idle",
+    message: "변경사항은 로컬에 먼저 저장되고, 온라인이 되면 자동으로 동기화됩니다.",
+    pushedCount: 0,
+    pulledCount: 0,
+    conflictCount: 0,
+  };
+}
+
+function syncStatusToneText(tone: SyncStatusTone) {
+  switch (tone) {
+    case "syncing":
+      return "동기화 중";
+    case "success":
+      return "정상";
+    case "warning":
+      return "확인 필요";
+    case "error":
+      return "실패";
+    default:
+      return "대기";
+  }
+}
+
+function buildSyncStatusMessage(response: SyncActionResponse) {
+  if (response.conflictCount > 0) {
+    return `동기화 완료. 서버 변경 ${response.pulledCount}건을 반영했고 충돌 ${response.conflictCount}건은 더 최신인 로컬 값을 유지했습니다.`;
+  }
+
+  if (response.pushedCount === 0 && response.pulledCount === 0) {
+    return "동기화할 새 변경이 없습니다.";
+  }
+
+  const segments: string[] = [];
+  if (response.pushedCount > 0) {
+    segments.push(`업로드 ${response.pushedCount}건`);
+  }
+  if (response.pulledCount > 0) {
+    segments.push(`반영 ${response.pulledCount}건`);
+  }
+
+  return `동기화 완료. ${segments.join(", ")} 처리했습니다.`;
+}
+
+function parseReminderTime(reminder: string) {
+  const matched = /^(\d{2}):(\d{2})$/.exec(reminder.trim());
+  if (!matched) {
+    return null;
+  }
+
+  return {
+    hour: Number(matched[1]),
+    minute: Number(matched[2]),
+  };
+}
+
+function weekdayToNotificationDay(weekdayIndex: number) {
+  return weekdayIndex + 1;
+}
+
+function hashNotificationSeed(seed: string) {
+  let hash = 0;
+
+  for (const character of seed) {
+    hash = (hash * 33 + character.charCodeAt(0)) >>> 0;
+  }
+
+  return hash & 0x7fffffff;
+}
+
+function buildManagedReminderId(routineId: string, weekday: number) {
+  return ROUTINE_REMINDER_ID_BASE + (hashNotificationSeed(`${routineId}:${weekday}`) % ROUTINE_REMINDER_ID_RANGE);
+}
+
+function isManagedReminderId(id: number) {
+  return id >= ROUTINE_REMINDER_ID_BASE && id < ROUTINE_REMINDER_ID_BASE + ROUTINE_REMINDER_ID_RANGE;
+}
+
+function notificationPermissionText(status: NotificationPermissionStatus) {
+  switch (status) {
+    case "granted":
+      return "권한 허용됨";
+    case "denied":
+      return "권한 거부됨";
+    case "prompt":
+      return "권한 요청 전";
+    case "prompt-with-rationale":
+      return "권한 설명 필요";
+    case "default":
+      return "권한 요청 전";
+    case "checking":
+      return "권한 확인 중";
+    case "unavailable":
+      return "미지원 환경";
+    default:
+      return "상태 확인 중";
+  }
+}
+
+function buildRoutineReminderSpecs(routines: Routine[]) {
+  const specs: ReminderSpec[] = [];
+
+  for (const routine of routines) {
+    if (!routine.reminder) {
+      continue;
+    }
+
+    const reminder = parseReminderTime(routine.reminder);
+    if (!reminder) {
+      continue;
+    }
+
+    const body = `${routine.title} 루틴을 체크할 시간입니다.`;
+
+    if (routine.frequency === "Daily") {
+      specs.push({
+        id: buildManagedReminderId(routine.id, 0),
+        title: "Daily Check 리마인더",
+        body,
+        schedule: Schedule.interval({
+          hour: reminder.hour,
+          minute: reminder.minute,
+          second: 0,
+        }),
+      });
+      continue;
+    }
+
+    const weekMask =
+      routine.frequency === "CustomDays" ? routine.weekdayMask : maskForFrequency(routine.frequency);
+
+    weekMask.split("").forEach((enabled, index) => {
+      if (enabled !== "1") {
+        return;
+      }
+
+      specs.push({
+        id: buildManagedReminderId(routine.id, index + 1),
+        title: "Daily Check 리마인더",
+        body,
+        schedule: Schedule.interval({
+          weekday: weekdayToNotificationDay(index),
+          hour: reminder.hour,
+          minute: reminder.minute,
+          second: 0,
+        }),
+      });
+    });
+  }
+
+  return specs;
+}
+
+function completionPercent(completed: number, scheduled: number) {
+  if (scheduled === 0) {
+    return 0;
+  }
+
+  return Math.round((completed / scheduled) * 100);
+}
+
+function summarizeRoutine(routine: Routine, dateKeys: string[]): CompletionSummary {
+  let scheduled = 0;
+  let completed = 0;
+
+  for (const dateKey of dateKeys) {
+    if (!isScheduledOnWeekday(routine, dateFromKey(dateKey).getDay())) {
+      continue;
+    }
+
+    scheduled += 1;
+    if (routine.completedDates.includes(dateKey)) {
+      completed += 1;
+    }
+  }
+
+  return {
+    scheduled,
+    completed,
+    percent: completionPercent(completed, scheduled),
+  };
+}
+
+function summarizeAllRoutines(routines: Routine[], dateKeys: string[]): CompletionSummary {
+  let scheduled = 0;
+  let completed = 0;
+
+  for (const routine of routines) {
+    const summary = summarizeRoutine(routine, dateKeys);
+    scheduled += summary.scheduled;
+    completed += summary.completed;
+  }
+
+  return {
+    scheduled,
+    completed,
+    percent: completionPercent(completed, scheduled),
+  };
+}
+
+function computeRoutineStreak(routine: Routine, anchor: Date) {
+  const cursor = new Date(anchor);
+  cursor.setHours(12, 0, 0, 0);
+
+  let streak = 0;
+  for (let offset = 0; offset < 365; offset += 1) {
+    const weekday = cursor.getDay();
+    if (isScheduledOnWeekday(routine, weekday)) {
+      const dateKey = toLocalDateKey(cursor);
+      if (routine.completedDates.includes(dateKey)) {
+        streak += 1;
+      } else {
+        break;
+      }
+    }
+
+    cursor.setDate(cursor.getDate() - 1);
+  }
+
+  return streak;
 }
 
 function buildEmptyDraft(): RoutineDraft {
@@ -276,6 +571,13 @@ function TabIcon({ tab, active }: { tab: TabId; active: boolean }) {
           <path {...common} d="M4 10h16M9.3 5v15M14.7 5v15" />
         </svg>
       );
+    case "stats":
+      return (
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path {...common} d="M6 18V11M12 18V7M18 18v-4" />
+          <path {...common} d="M4 18h16" />
+        </svg>
+      );
     case "pomodoro":
       return (
         <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -330,16 +632,33 @@ function App() {
   const [isTimerRunning, setIsTimerRunning] = useState(false);
   const [isWorking, setIsWorking] = useState(false);
   const [now, setNow] = useState(() => new Date());
+  const [notificationPermission, setNotificationPermission] =
+    useState<NotificationPermissionStatus>("checking");
+  const [isOnline, setIsOnline] = useState(() => isNavigatorOnline());
+  const [syncStatus, setSyncStatus] = useState<SyncStatus>(() => buildInitialSyncStatus());
+  const syncInFlightRef = useRef(false);
 
   const weekDays = useMemo(() => buildWeekDays(now), [now]);
+  const monthDays = useMemo(() => buildMonthDays(now), [now]);
   const todayKey = useMemo(() => toLocalDateKey(now), [now]);
   const routines = snapshot.routines;
   const activeRoutine = routines.find((routine) => routine.id === activeRoutineId) ?? routines[0] ?? null;
   const editorRoutine = routines.find((routine) => routine.id === editorRoutineId) ?? null;
   const currentTabLabel = tabs.find((tab) => tab.id === activeTab)?.label ?? "오늘";
+  const weekKeys = useMemo(() => weekDays.map((day) => day.key), [weekDays]);
   const todayRoutines = useMemo(
     () => routines.filter((routine) => isScheduledOnWeekday(routine, now.getDay())),
     [routines, now],
+  );
+  const reminderSignature = useMemo(
+    () =>
+      routines
+        .map((routine) =>
+          [routine.id, routine.title, routine.frequency, routine.weekdayMask, routine.reminder].join("|"),
+        )
+        .sort()
+        .join("||"),
+    [routines],
   );
 
   const todayCompletion = useMemo(() => {
@@ -350,10 +669,55 @@ function App() {
     const completed = todayRoutines.filter((routine) => routine.completedDates.includes(todayKey)).length;
     return Math.round((completed / todayRoutines.length) * 100);
   }, [todayRoutines, todayKey]);
+  const weeklySummary = useMemo(() => summarizeAllRoutines(routines, weekKeys), [routines, weekKeys]);
+  const monthlySummary = useMemo(() => summarizeAllRoutines(routines, monthDays), [routines, monthDays]);
+  const routineStats = useMemo(() => {
+    return routines
+      .map((routine) => ({
+        routine,
+        weekly: summarizeRoutine(routine, weekKeys),
+        monthly: summarizeRoutine(routine, monthDays),
+        streak: computeRoutineStreak(routine, now),
+      }))
+      .sort((left, right) => {
+        if (right.monthly.percent !== left.monthly.percent) {
+          return right.monthly.percent - left.monthly.percent;
+        }
+
+        if (right.streak !== left.streak) {
+          return right.streak - left.streak;
+        }
+
+        return left.routine.title.localeCompare(right.routine.title, "ko");
+      });
+  }, [routines, weekKeys, monthDays, now]);
+  const bestRoutineStat = useMemo(
+    () => routineStats.find((stat) => stat.monthly.scheduled > 0) ?? null,
+    [routineStats],
+  );
+  const attentionRoutineStat = useMemo(() => {
+    return [...routineStats]
+      .reverse()
+      .find((stat) => stat.monthly.scheduled > 0) ?? null;
+  }, [routineStats]);
+  const topStreak = useMemo(
+    () => routineStats.reduce((max, stat) => Math.max(max, stat.streak), 0),
+    [routineStats],
+  );
 
   useEffect(() => {
     const interval = window.setInterval(() => setNow(new Date()), 60_000);
     return () => window.clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
+    const updateOnlineState = () => setIsOnline(isNavigatorOnline());
+    window.addEventListener("online", updateOnlineState);
+    window.addEventListener("offline", updateOnlineState);
+    return () => {
+      window.removeEventListener("online", updateOnlineState);
+      window.removeEventListener("offline", updateOnlineState);
+    };
   }, []);
 
   useEffect(() => {
@@ -412,6 +776,15 @@ function App() {
   }, [snapshot.syncServerUrl]);
 
   useEffect(() => {
+    if (!isUnlocked || runtimeMode !== "native") {
+      setNotificationPermission(runtimeMode === "native" ? "checking" : "unavailable");
+      return;
+    }
+
+    void syncNotificationPermission(false);
+  }, [isUnlocked, runtimeMode]);
+
+  useEffect(() => {
     if (!routines.length) {
       setActiveRoutineId(null);
       return;
@@ -463,6 +836,8 @@ function App() {
       return;
     }
 
+    const completedPhase = timerPhase;
+
     const timer = window.setInterval(() => {
       setRemainingSeconds((current) => {
         if (current <= 1) {
@@ -470,10 +845,11 @@ function App() {
           setIsTimerRunning(false);
           setTimerPhase((phase) => (phase === "focus" ? "break" : "focus"));
           setActionMessage(
-            timerPhase === "focus"
+            completedPhase === "focus"
               ? "집중 시간이 끝났습니다. 휴식 타이머로 전환했어요."
               : "휴식이 끝났습니다. 다시 집중할 시간입니다.",
           );
+          void sendPomodoroNotification(completedPhase);
           return 0;
         }
 
@@ -482,7 +858,96 @@ function App() {
     }, 1000);
 
     return () => window.clearInterval(timer);
-  }, [isTimerRunning]);
+  }, [isTimerRunning, timerPhase, activeRoutine?.title, runtimeMode, snapshot.soundEnabled]);
+
+  useEffect(() => {
+    if (!isUnlocked || runtimeMode !== "native") {
+      return;
+    }
+
+    let disposed = false;
+
+    async function syncRoutineReminders() {
+      const permission = await syncNotificationPermission(false);
+      if (disposed) {
+        return;
+      }
+
+      const scheduled = await pending();
+      if (disposed) {
+        return;
+      }
+
+      const managedIds = scheduled.filter((entry) => isManagedReminderId(entry.id)).map((entry) => entry.id);
+      if (managedIds.length > 0) {
+        await cancel(managedIds);
+      }
+
+      if (permission !== "granted") {
+        return;
+      }
+
+      for (const spec of buildRoutineReminderSpecs(routines)) {
+        sendNotification({
+          ...spec,
+          group: "routine-reminders",
+          silent: !snapshot.soundEnabled,
+        });
+      }
+    }
+
+    void syncRoutineReminders();
+
+    return () => {
+      disposed = true;
+    };
+  }, [isUnlocked, runtimeMode, reminderSignature, notificationPermission, snapshot.soundEnabled]);
+
+  useEffect(() => {
+    if (!isUnlocked || runtimeMode !== "native") {
+      return;
+    }
+
+    if (isOnline) {
+      void runSync("reconnect");
+      return;
+    }
+
+    setSyncStatus({
+      tone: "warning",
+      message:
+        snapshot.outboxCount > 0
+          ? `오프라인 상태입니다. 변경 ${snapshot.outboxCount}개를 로컬에 보관 중입니다.`
+          : "오프라인 상태입니다. 연결이 돌아오면 자동으로 동기화합니다.",
+      pushedCount: 0,
+      pulledCount: 0,
+      conflictCount: 0,
+    });
+  }, [isOnline, isUnlocked, runtimeMode, snapshot.outboxCount, syncKey]);
+
+  useEffect(() => {
+    if (!isUnlocked || runtimeMode !== "native" || !isOnline || snapshot.outboxCount === 0) {
+      return;
+    }
+
+    const timeout = window.setTimeout(() => {
+      void runSync("auto");
+    }, 2500);
+
+    return () => window.clearTimeout(timeout);
+  }, [snapshot.outboxCount, isUnlocked, runtimeMode, isOnline, syncKey]);
+
+  useEffect(() => {
+    if (!isUnlocked || runtimeMode !== "native" || !isOnline) {
+      return;
+    }
+
+    const interval = window.setInterval(() => {
+      void runSync("auto");
+    }, 60_000);
+
+    return () => window.clearInterval(interval);
+  }, [isUnlocked, runtimeMode, isOnline, syncKey]);
 
   function applySnapshot(nextSnapshot: AppSnapshot) {
     setSnapshot(nextSnapshot);
@@ -495,6 +960,144 @@ function App() {
       return nextSnapshot;
     });
     return nextSnapshot;
+  }
+
+  async function runSync(mode: "manual" | "auto" | "reconnect" = "manual") {
+    if (runtimeMode !== "native") {
+      if (mode === "manual") {
+        setActionMessage("미리보기 모드에서는 서버 동기화를 실행할 수 없습니다.");
+      }
+      return;
+    }
+
+    if (!syncKey) {
+      if (mode === "manual") {
+        setActionMessage("동기화 키를 먼저 설정하세요.");
+      }
+      return;
+    }
+
+    if (!isNavigatorOnline()) {
+      const message =
+        snapshot.outboxCount > 0
+          ? `오프라인 상태입니다. 변경 ${snapshot.outboxCount}개를 로컬에 보관 중입니다.`
+          : "오프라인 상태입니다. 연결이 돌아오면 자동으로 동기화합니다.";
+      setSyncStatus({
+        tone: "warning",
+        message,
+        pushedCount: 0,
+        pulledCount: 0,
+        conflictCount: 0,
+      });
+      if (mode === "manual") {
+        setActionMessage(message);
+      }
+      return;
+    }
+
+    if (syncInFlightRef.current) {
+      return;
+    }
+
+    syncInFlightRef.current = true;
+    setSyncStatus((current) => ({
+      ...current,
+      tone: "syncing",
+      message: mode === "manual" ? "서버와 동기화 중입니다." : "백그라운드에서 동기화 중입니다.",
+    }));
+
+    try {
+      const response = await invoke<SyncActionResponse>("sync_now");
+      applySnapshot(response.snapshot);
+
+      const nextMessage = buildSyncStatusMessage(response);
+      const nextTone: SyncStatusTone = response.conflictCount > 0 ? "warning" : "success";
+      setSyncStatus({
+        tone: nextTone,
+        message: nextMessage,
+        pushedCount: response.pushedCount,
+        pulledCount: response.pulledCount,
+        conflictCount: response.conflictCount,
+      });
+
+      if (mode === "manual" || response.conflictCount > 0) {
+        setActionMessage(nextMessage);
+      }
+    } catch (error) {
+      const nextMessage = `동기화에 실패했습니다. ${String(error)}`;
+      setSyncStatus({
+        tone: "error",
+        message: nextMessage,
+        pushedCount: 0,
+        pulledCount: 0,
+        conflictCount: 0,
+      });
+      if (mode === "manual") {
+        setActionMessage(nextMessage);
+      }
+    } finally {
+      syncInFlightRef.current = false;
+    }
+  }
+
+  async function syncNotificationPermission(interactive: boolean) {
+    if (runtimeMode !== "native") {
+      setNotificationPermission("unavailable");
+      return "unavailable" as const;
+    }
+
+    try {
+      const browserPermission =
+        typeof window.Notification !== "undefined" ? window.Notification.permission : "default";
+
+      if (browserPermission !== "default") {
+        setNotificationPermission(browserPermission);
+        return browserPermission;
+      }
+
+      const granted = await isPermissionGranted();
+      if (granted) {
+        setNotificationPermission("granted");
+        return "granted" as const;
+      }
+
+      if (!interactive) {
+        setNotificationPermission("default");
+        return "default" as const;
+      }
+
+      const permission = await requestPermission();
+      setNotificationPermission(permission);
+      return permission;
+    } catch {
+      setNotificationPermission("denied");
+      return "denied" as const;
+    }
+  }
+
+  async function sendPomodoroNotification(completedPhase: TimerPhase) {
+    if (runtimeMode !== "native") {
+      return;
+    }
+
+    const permission = await syncNotificationPermission(false);
+    if (permission !== "granted") {
+      return;
+    }
+
+    const title = completedPhase === "focus" ? "집중 시간이 끝났습니다." : "휴식이 끝났습니다.";
+    const body =
+      completedPhase === "focus"
+        ? `${activeRoutine?.title ?? "선택한 루틴"} 휴식으로 전환할 시간입니다.`
+        : `${activeRoutine?.title ?? "선택한 루틴"} 다시 집중을 시작할 시간입니다.`;
+
+    sendNotification({
+      id: POMODORO_NOTIFICATION_ID_BASE + (completedPhase === "focus" ? 1 : 2),
+      title,
+      body,
+      group: "pomodoro",
+      silent: !snapshot.soundEnabled,
+    });
   }
 
   async function handleUnlock() {
@@ -514,6 +1117,13 @@ function App() {
           if (response.snapshot) {
             applySnapshot(response.snapshot);
           }
+          setSyncStatus({
+            tone: response.message.includes("오프라인") ? "warning" : "success",
+            message: response.message,
+            pushedCount: 0,
+            pulledCount: 0,
+            conflictCount: 0,
+          });
           setIsUnlocked(true);
         }
       } catch (error) {
@@ -548,6 +1158,13 @@ function App() {
         setSyncKey(response.syncKey);
         setInputValue(response.syncKey);
         setLoginMessage(response.message);
+        setSyncStatus({
+          tone: "warning",
+          message: "동기화 키를 바꿨습니다. 다른 기기에서도 새 키를 다시 입력해야 합니다.",
+          pushedCount: 0,
+          pulledCount: 0,
+          conflictCount: 0,
+        });
       } catch (error) {
         setLoginMessage(String(error));
       } finally {
@@ -574,6 +1191,13 @@ function App() {
       try {
         const next = await invoke<AppSnapshot>("update_sync_server_url", { input: trimmed });
         applySnapshot(next);
+        setSyncStatus({
+          tone: "idle",
+          message: "새 서버 주소를 저장했습니다. 필요하면 지금 동기화를 눌러 바로 확인할 수 있습니다.",
+          pushedCount: 0,
+          pulledCount: 0,
+          conflictCount: 0,
+        });
         setActionMessage("동기화 서버 주소를 저장했습니다.");
       } catch (error) {
         setActionMessage(String(error));
@@ -591,21 +1215,38 @@ function App() {
   }
 
   async function handleSyncNow() {
+    await runSync("manual");
+  }
+
+  async function handleRequestNotificationPermission() {
+    const permission = await syncNotificationPermission(true);
+    setActionMessage(
+      permission === "granted"
+        ? "알림 권한을 허용했습니다."
+        : "알림 권한이 허용되지 않았습니다. 시스템 설정을 확인해 주세요.",
+    );
+  }
+
+  async function handleSendTestNotification() {
     if (runtimeMode !== "native") {
-      setActionMessage("미리보기 모드에서는 서버 동기화를 실행할 수 없습니다.");
+      setActionMessage("미리보기 모드에서는 테스트 알림을 보낼 수 없습니다.");
       return;
     }
 
-    setIsWorking(true);
-    try {
-      const response = await invoke<SyncActionResponse>("sync_now");
-      applySnapshot(response.snapshot);
-      setActionMessage(response.message);
-    } catch (error) {
-      setActionMessage(String(error));
-    } finally {
-      setIsWorking(false);
+    const permission = await syncNotificationPermission(true);
+    if (permission !== "granted") {
+      setActionMessage("알림 권한이 필요합니다.");
+      return;
     }
+
+    sendNotification({
+      id: TEST_NOTIFICATION_ID,
+      title: "Daily Check 테스트 알림",
+      body: "루틴 리마인더와 종료 알림이 이 형태로 표시됩니다.",
+      group: "test-notifications",
+      silent: !snapshot.soundEnabled,
+    });
+    setActionMessage("테스트 알림을 보냈습니다.");
   }
 
   async function persistRoutineToggle(routineId: string, date: string) {
@@ -705,6 +1346,22 @@ function App() {
     } finally {
       setIsWorking(false);
     }
+  }
+
+  async function handleStartTimer() {
+    if (!activeRoutine) {
+      setActionMessage("뽀모도로를 연결할 루틴을 먼저 선택하세요.");
+      return;
+    }
+
+    if (runtimeMode === "native" && notificationPermission !== "granted" && notificationPermission !== "denied") {
+      const permission = await syncNotificationPermission(true);
+      if (permission !== "granted") {
+        setActionMessage("알림 권한이 없어 종료 알림 없이 타이머를 시작합니다.");
+      }
+    }
+
+    setIsTimerRunning(true);
   }
 
   async function handleSaveRoutine() {
@@ -992,7 +1649,7 @@ function App() {
           </div>
 
           <div className="button-row">
-            <button className="primary-button" onClick={() => setIsTimerRunning(true)} disabled={!activeRoutine}>
+            <button className="primary-button" onClick={handleStartTimer} disabled={!activeRoutine}>
               시작
             </button>
             <button className="ghost-button" onClick={() => setIsTimerRunning(false)} disabled={!activeRoutine}>
@@ -1066,6 +1723,93 @@ function App() {
               저장
             </button>
           </div>
+        </section>
+      </div>
+    );
+  }
+
+  function renderStatsScreen() {
+    return (
+      <div className="screen-stack">
+        <section className="summary-strip stats-strip">
+          <article className="mini-card panel">
+            <span>이번 주 완료율</span>
+            <strong>{weeklySummary.percent}%</strong>
+          </article>
+          <article className="mini-card panel">
+            <span>이번 달 완료율</span>
+            <strong>{monthlySummary.percent}%</strong>
+          </article>
+          <article className="mini-card panel">
+            <span>최고 연속 기록</span>
+            <strong>{topStreak}일</strong>
+          </article>
+        </section>
+
+        <section className="summary-strip">
+          <article className="mini-card panel">
+            <span>이번 달 가장 잘 지킨 루틴</span>
+            <strong>{bestRoutineStat?.routine.title ?? "아직 없음"}</strong>
+            <p className="supporting stats-card-copy">
+              {bestRoutineStat ? `${bestRoutineStat.monthly.percent}% 완료` : "루틴을 만들면 바로 집계됩니다."}
+            </p>
+          </article>
+          <article className="mini-card panel">
+            <span>더 챙기면 좋은 루틴</span>
+            <strong>{attentionRoutineStat?.routine.title ?? "아직 없음"}</strong>
+            <p className="supporting stats-card-copy">
+              {attentionRoutineStat
+                ? `${attentionRoutineStat.monthly.percent}% 완료`
+                : "루틴을 만들면 바로 집계됩니다."}
+            </p>
+          </article>
+        </section>
+
+        <section className="panel block-panel">
+          <div className="section-head">
+            <h2>루틴별 현황</h2>
+            <span className="tag-pill">{`${now.getMonth() + 1}월 누적`}</span>
+          </div>
+
+          {routineStats.length === 0 ? (
+            <p className="empty-copy">통계를 보려면 먼저 루틴을 만들어 주세요.</p>
+          ) : (
+            <div className="stats-list">
+              {routineStats.map((stat) => (
+                <article className="routine-stat-card" key={stat.routine.id}>
+                  <div className="stat-card-head">
+                    <div className="stat-title">
+                      <span className="grid-dot" style={{ background: stat.routine.accent }} />
+                      <strong>{stat.routine.title}</strong>
+                    </div>
+                    <span className="tag-pill">{`${stat.streak}일 연속`}</span>
+                  </div>
+
+                  <div className="progress-block">
+                    <div className="progress-meta">
+                      <span>주간</span>
+                      <strong>{`${stat.weekly.completed}/${stat.weekly.scheduled || 0}`}</strong>
+                    </div>
+                    <div className="progress-track">
+                      <div className="progress-fill" style={{ width: `${stat.weekly.percent}%`, background: stat.routine.accent }} />
+                    </div>
+                    <span className="supporting">{`${stat.weekly.percent}% 완료`}</span>
+                  </div>
+
+                  <div className="progress-block">
+                    <div className="progress-meta">
+                      <span>월간</span>
+                      <strong>{`${stat.monthly.completed}/${stat.monthly.scheduled || 0}`}</strong>
+                    </div>
+                    <div className="progress-track">
+                      <div className="progress-fill" style={{ width: `${stat.monthly.percent}%`, background: stat.routine.accent }} />
+                    </div>
+                    <span className="supporting">{`${stat.monthly.percent}% 완료`}</span>
+                  </div>
+                </article>
+              ))}
+            </div>
+          )}
         </section>
       </div>
     );
@@ -1217,14 +1961,23 @@ function App() {
   function renderSettingsScreen() {
     return (
       <div className="screen-stack">
-        <section className="summary-strip">
+        <section className="summary-strip stats-strip">
           <article className="mini-card panel">
             <span>대기 중 변경</span>
             <strong>{snapshot.outboxCount}개</strong>
+            <p className="supporting stats-card-copy">
+              {snapshot.outboxCount > 0 ? "연결되면 자동으로 서버에 보냅니다." : "로컬과 서버가 같은 상태입니다."}
+            </p>
+          </article>
+          <article className="mini-card panel">
+            <span>동기화 상태</span>
+            <strong>{syncStatusToneText(syncStatus.tone)}</strong>
+            <p className="supporting stats-card-copy">{syncStatus.message}</p>
           </article>
           <article className="mini-card panel">
             <span>마지막 동기화</span>
             <strong>{snapshot.lastSyncAt ?? "아직 없음"}</strong>
+            <p className="supporting stats-card-copy">{isOnline ? "온라인" : "오프라인"}</p>
           </article>
         </section>
 
@@ -1235,7 +1988,11 @@ function App() {
               <button className="ghost-button small-button" onClick={handleSaveServerUrl} disabled={isWorking}>
                 주소 저장
               </button>
-              <button className="primary-button small-button" onClick={handleSyncNow} disabled={isWorking}>
+              <button
+                className="primary-button small-button"
+                onClick={handleSyncNow}
+                disabled={isWorking || syncStatus.tone === "syncing"}
+              >
                 지금 동기화
               </button>
             </div>
@@ -1249,6 +2006,51 @@ function App() {
               placeholder="http://localhost:8787"
             />
           </label>
+
+          <div className="sync-state-card">
+            <div className="sync-state-row">
+              <span className={`status-pill status-pill-${syncStatus.tone}`}>{syncStatusToneText(syncStatus.tone)}</span>
+              <span className="supporting">{isOnline ? "자동 동기화 켜짐" : "오프라인 저장 중"}</span>
+            </div>
+            <p className="supporting sync-state-copy">{syncStatus.message}</p>
+
+            <div className="sync-stat-row">
+              <div>
+                <span>업로드</span>
+                <strong>{syncStatus.pushedCount}건</strong>
+              </div>
+              <div>
+                <span>반영</span>
+                <strong>{syncStatus.pulledCount}건</strong>
+              </div>
+              <div>
+                <span>충돌</span>
+                <strong>{syncStatus.conflictCount}건</strong>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section className="panel block-panel">
+          <div className="section-head">
+            <h2>알림</h2>
+            <span className="tag-pill">{notificationPermissionText(notificationPermission)}</span>
+          </div>
+
+          <p className="supporting">루틴 리마인더와 뽀모도로 종료 알림에 사용합니다.</p>
+
+          <div className="button-row">
+            <button
+              className="ghost-button"
+              onClick={handleRequestNotificationPermission}
+              disabled={runtimeMode !== "native"}
+            >
+              권한 요청
+            </button>
+            <button className="primary-button" onClick={handleSendTestNotification} disabled={runtimeMode !== "native"}>
+              테스트 알림
+            </button>
+          </div>
         </section>
 
         <section className="panel block-panel">
@@ -1274,6 +2076,8 @@ function App() {
         return renderTodayScreen();
       case "weekly":
         return renderWeeklyScreen();
+      case "stats":
+        return renderStatsScreen();
       case "pomodoro":
         return renderPomodoroScreen();
       case "routines":

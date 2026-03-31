@@ -257,6 +257,10 @@ select:focus {
   gap: 14px;
 }
 
+.stats-strip {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
 .mini-card,
 .block-panel,
 .sync-key-card {
@@ -538,10 +542,133 @@ select:focus {
   border: 1px solid var(--soft-border);
 }
 
+.sync-state-card {
+  margin-top: 16px;
+  display: grid;
+  gap: 14px;
+  padding: 18px;
+  border-radius: 24px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--soft-border);
+}
+
+.sync-state-row,
+.sync-stat-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  justify-content: space-between;
+  flex-wrap: wrap;
+}
+
+.sync-state-copy {
+  margin: 0;
+}
+
+.sync-stat-row > div {
+  display: grid;
+  gap: 4px;
+  min-width: 92px;
+}
+
+.sync-stat-row span {
+  color: var(--muted);
+  font-size: 0.78rem;
+  letter-spacing: 0.08em;
+}
+
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px 12px;
+  border-radius: 999px;
+  font-size: 0.82rem;
+  font-weight: 700;
+  border: 1px solid transparent;
+}
+
+.status-pill-idle {
+  background: rgba(255, 255, 255, 0.06);
+  color: #d9ded8;
+}
+
+.status-pill-syncing {
+  background: rgba(56, 189, 248, 0.16);
+  color: #b7ecff;
+  border-color: rgba(56, 189, 248, 0.24);
+}
+
+.status-pill-success {
+  background: rgba(34, 197, 94, 0.16);
+  color: #c9f8d7;
+  border-color: rgba(34, 197, 94, 0.24);
+}
+
+.status-pill-warning {
+  background: rgba(250, 204, 21, 0.18);
+  color: #fff0a8;
+  border-color: rgba(250, 204, 21, 0.24);
+}
+
+.status-pill-error {
+  background: rgba(251, 113, 133, 0.18);
+  color: #ffd7de;
+  border-color: rgba(251, 113, 133, 0.24);
+}
+
 .sync-key-card strong {
   display: block;
   margin-top: 10px;
   word-break: break-word;
+}
+
+.stats-card-copy {
+  margin: 12px 0 0;
+}
+
+.stats-list {
+  display: grid;
+  gap: 14px;
+}
+
+.routine-stat-card {
+  display: grid;
+  gap: 16px;
+  padding: 18px;
+  border-radius: 24px;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.stat-card-head,
+.stat-title,
+.progress-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.stat-title {
+  justify-content: flex-start;
+}
+
+.progress-block {
+  display: grid;
+  gap: 8px;
+}
+
+.progress-track {
+  overflow: hidden;
+  width: 100%;
+  height: 10px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.progress-fill {
+  height: 100%;
+  border-radius: 999px;
 }
 
 .tab-bar {
@@ -661,6 +788,10 @@ select:focus {
 
   .summary-strip,
   .form-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .stats-strip {
     grid-template-columns: 1fr;
   }
 
