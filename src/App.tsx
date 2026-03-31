@@ -399,7 +399,11 @@ function completionPercent(completed: number, scheduled: number) {
   return Math.round((completed / scheduled) * 100);
 }
 
-function summarizeRoutine(routine: Routine, dateKeys: string[]): CompletionSummary {
+function summarizeRoutine(
+  routine: Routine,
+  dateKeys: string[],
+  completedDates: ReadonlySet<string> = new Set(routine.completedDates),
+): CompletionSummary {
   let scheduled = 0;
   let completed = 0;
 
@@ -409,7 +413,7 @@ function summarizeRoutine(routine: Routine, dateKeys: string[]): CompletionSumma
     }
 
     scheduled += 1;
-    if (routine.completedDates.includes(dateKey)) {
+    if (completedDates.has(dateKey)) {
       completed += 1;
     }
   }
@@ -421,12 +425,16 @@ function summarizeRoutine(routine: Routine, dateKeys: string[]): CompletionSumma
   };
 }
 
-function summarizeAllRoutines(routines: Routine[], dateKeys: string[]): CompletionSummary {
+function summarizeAllRoutines(
+  routines: Routine[],
+  dateKeys: string[],
+  completedDateSets?: ReadonlyMap<string, ReadonlySet<string>>,
+): CompletionSummary {
   let scheduled = 0;
   let completed = 0;
 
   for (const routine of routines) {
-    const summary = summarizeRoutine(routine, dateKeys);
+    const summary = summarizeRoutine(routine, dateKeys, completedDateSets?.get(routine.id));
     scheduled += summary.scheduled;
     completed += summary.completed;
   }
@@ -438,7 +446,11 @@ function summarizeAllRoutines(routines: Routine[], dateKeys: string[]): Completi
   };
 }
 
-function computeRoutineStreak(routine: Routine, anchor: Date) {
+function computeRoutineStreak(
+  routine: Routine,
+  anchor: Date,
+  completedDates: ReadonlySet<string> = new Set(routine.completedDates),
+) {
   const cursor = new Date(anchor);
   cursor.setHours(12, 0, 0, 0);
 
@@ -447,7 +459,7 @@ function computeRoutineStreak(routine: Routine, anchor: Date) {
     const weekday = cursor.getDay();
     if (isScheduledOnWeekday(routine, weekday)) {
       const dateKey = toLocalDateKey(cursor);
-      if (routine.completedDates.includes(dateKey)) {
+      if (completedDates.has(dateKey)) {
         streak += 1;
       } else {
         break;
@@ -642,6 +654,10 @@ function App() {
   const monthDays = useMemo(() => buildMonthDays(now), [now]);
   const todayKey = useMemo(() => toLocalDateKey(now), [now]);
   const routines = snapshot.routines;
+  const completedDateSets = useMemo(
+    () => new Map(routines.map((routine) => [routine.id, new Set(routine.completedDates)])),
+    [routines],
+  );
   const activeRoutine = routines.find((routine) => routine.id === activeRoutineId) ?? routines[0] ?? null;
   const editorRoutine = routines.find((routine) => routine.id === editorRoutineId) ?? null;
   const currentTabLabel = tabs.find((tab) => tab.id === activeTab)?.label ?? "오늘";
@@ -666,18 +682,24 @@ function App() {
       return 0;
     }
 
-    const completed = todayRoutines.filter((routine) => routine.completedDates.includes(todayKey)).length;
+    const completed = todayRoutines.filter((routine) => completedDateSets.get(routine.id)?.has(todayKey)).length;
     return Math.round((completed / todayRoutines.length) * 100);
-  }, [todayRoutines, todayKey]);
-  const weeklySummary = useMemo(() => summarizeAllRoutines(routines, weekKeys), [routines, weekKeys]);
-  const monthlySummary = useMemo(() => summarizeAllRoutines(routines, monthDays), [routines, monthDays]);
+  }, [todayRoutines, todayKey, completedDateSets]);
+  const weeklySummary = useMemo(
+    () => summarizeAllRoutines(routines, weekKeys, completedDateSets),
+    [routines, weekKeys, completedDateSets],
+  );
+  const monthlySummary = useMemo(
+    () => summarizeAllRoutines(routines, monthDays, completedDateSets),
+    [routines, monthDays, completedDateSets],
+  );
   const routineStats = useMemo(() => {
     return routines
       .map((routine) => ({
         routine,
-        weekly: summarizeRoutine(routine, weekKeys),
-        monthly: summarizeRoutine(routine, monthDays),
-        streak: computeRoutineStreak(routine, now),
+        weekly: summarizeRoutine(routine, weekKeys, completedDateSets.get(routine.id)),
+        monthly: summarizeRoutine(routine, monthDays, completedDateSets.get(routine.id)),
+        streak: computeRoutineStreak(routine, now, completedDateSets.get(routine.id)),
       }))
       .sort((left, right) => {
         if (right.monthly.percent !== left.monthly.percent) {
@@ -690,7 +712,7 @@ function App() {
 
         return left.routine.title.localeCompare(right.routine.title, "ko");
       });
-  }, [routines, weekKeys, monthDays, now]);
+  }, [routines, weekKeys, monthDays, now, completedDateSets]);
   const bestRoutineStat = useMemo(
     () => routineStats.find((stat) => stat.monthly.scheduled > 0) ?? null,
     [routineStats],
@@ -1529,7 +1551,7 @@ function App() {
               <p className="empty-copy">오늘 체크할 루틴이 없습니다.</p>
             ) : (
               todayRoutines.map((routine) => {
-                const completed = routine.completedDates.includes(todayKey);
+                const completed = completedDateSets.get(routine.id)?.has(todayKey) ?? false;
                 return (
                   <article className="routine-card" key={routine.id}>
                     <input
@@ -1595,7 +1617,7 @@ function App() {
                   </button>
 
                   {weekDays.map((day) => {
-                    const checked = routine.completedDates.includes(day.key);
+                    const checked = completedDateSets.get(routine.id)?.has(day.key) ?? false;
                     const enabled = isScheduledOnWeekday(routine, day.weekdayIndex);
                     return (
                       <button

@@ -379,8 +379,7 @@ pub fn update_sync_server_url(
     state: State<AppState>,
 ) -> Result<AppSnapshot, String> {
     let conn = open_connection(&state.db_path).map_err(|error| error.to_string())?;
-    let normalized = normalize_server_url(&input)?;
-    set_setting(&conn, "sync_server_url", &normalized).map_err(|error| error.to_string())?;
+    persist_sync_server_url(&conn, &input).map_err(|error| error.to_string())?;
     load_snapshot(&conn).map_err(|error| error.to_string())
 }
 
@@ -1384,6 +1383,12 @@ fn set_setting(conn: &Connection, key: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
+fn delete_setting(conn: &Connection, key: &str) -> Result<()> {
+    conn.execute("DELETE FROM settings WHERE key = ?1", [key])
+        .context("failed to delete setting")?;
+    Ok(())
+}
+
 fn get_sync_server_url(conn: &Connection) -> Result<String> {
     let existing = get_setting(conn, "sync_server_url")?
         .unwrap_or_else(|| DEFAULT_SYNC_SERVER_URL.to_string());
@@ -1398,6 +1403,23 @@ fn get_or_create_device_id(conn: &Connection) -> Result<String> {
     let device_id = Uuid::new_v4().to_string();
     set_setting(conn, "device_id", &device_id)?;
     Ok(device_id)
+}
+
+fn persist_sync_server_url(conn: &Connection, input: &str) -> Result<()> {
+    let normalized = normalize_server_url(input).map_err(anyhow::Error::msg)?;
+    let current = get_sync_server_url(conn)?;
+
+    with_write_transaction(conn, |conn| {
+        set_setting(conn, "sync_server_url", &normalized).map_err(|error| error.to_string())?;
+
+        if current != normalized {
+            delete_setting(conn, "server_cursor").map_err(|error| error.to_string())?;
+            delete_setting(conn, "last_sync_at").map_err(|error| error.to_string())?;
+        }
+
+        Ok(())
+    })
+    .map_err(anyhow::Error::msg)
 }
 
 fn queue_outbox<T: Serialize>(
@@ -1677,6 +1699,26 @@ mod tests {
     }
 
     #[test]
+    fn changing_sync_server_url_resets_remote_cursor_state() {
+        let db = TestDb::new();
+        let conn = db.connection().expect("db init");
+        reset_local_test_state(&conn).expect("reset local state");
+
+        set_setting(&conn, "sync_server_url", "http://localhost:8787").expect("seed server url");
+        set_setting(&conn, "server_cursor", "42").expect("seed cursor");
+        set_setting(&conn, "last_sync_at", "1710000000").expect("seed last sync");
+
+        persist_sync_server_url(&conn, "https://sync.example.com").expect("update server url");
+
+        assert_eq!(
+            get_setting(&conn, "sync_server_url").expect("read server url"),
+            Some("https://sync.example.com".into())
+        );
+        assert_eq!(get_setting(&conn, "server_cursor").expect("read cursor"), None);
+        assert_eq!(get_setting(&conn, "last_sync_at").expect("read last sync"), None);
+    }
+
+    #[test]
     fn online_sync_replays_crud_between_two_devices() {
         let Some(server_url) = sync_test_server_url() else {
             eprintln!("SYNC_TEST_SERVER_URL not set; skipping online sync test");
@@ -1774,6 +1816,66 @@ mod tests {
         assert_eq!(
             find_routine_title(&snapshot_b, "conflict-routine"),
             Some("더 최신 값")
+        );
+        assert_eq!(pending_outbox_count(&conn_a), 0);
+        assert_eq!(pending_outbox_count(&conn_b), 0);
+    }
+
+    #[test]
+    fn stale_remote_check_delete_does_not_override_newer_completion() {
+        let Some(server_url) = sync_test_server_url() else {
+            eprintln!("SYNC_TEST_SERVER_URL not set; skipping check concurrency test");
+            return;
+        };
+
+        let sync_key = format!(
+            "VERIFY-CHECK-{}",
+            &Uuid::new_v4().simple().to_string()[..8]
+        );
+        let db_a = TestDb::new();
+        let conn_a = db_a.connection().expect("db a init");
+        reset_local_test_state(&conn_a).expect("reset db a");
+        set_setting(&conn_a, "sync_server_url", &server_url).expect("set db a server url");
+
+        let db_b = TestDb::new();
+        let conn_b = db_b.connection().expect("db b init");
+        reset_local_test_state(&conn_b).expect("reset db b");
+        set_setting(&conn_b, "sync_server_url", &server_url).expect("set db b server url");
+
+        insert_routine_event(&conn_a, "check-conflict-routine", "체크 충돌 루틴", 1_710_000_401)
+            .expect("seed routine");
+        connect_new_device(&conn_a, &server_url, &sync_key).expect("device a initial sync");
+        connect_new_device(&conn_b, &server_url, &sync_key).expect("device b initial pull");
+
+        toggle_check_event(
+            &conn_b,
+            "check-conflict-routine",
+            "2026-03-31",
+            true,
+            1_710_000_500,
+        )
+        .expect("device b newer completion");
+        sync_existing_device(&conn_b, &sync_key).expect("device b sync newer completion");
+
+        toggle_check_event(
+            &conn_a,
+            "check-conflict-routine",
+            "2026-03-31",
+            false,
+            1_710_000_450,
+        )
+        .expect("device a stale delete");
+        let snapshot_a =
+            sync_existing_device(&conn_a, &sync_key).expect("device a sync stale delete");
+        assert_eq!(
+            snapshot_a.routines[0].completed_dates,
+            vec!["2026-03-31".to_string()]
+        );
+
+        let snapshot_b = sync_existing_device(&conn_b, &sync_key).expect("device b final sync");
+        assert_eq!(
+            snapshot_b.routines[0].completed_dates,
+            vec!["2026-03-31".to_string()]
         );
         assert_eq!(pending_outbox_count(&conn_a), 0);
         assert_eq!(pending_outbox_count(&conn_b), 0);

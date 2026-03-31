@@ -293,8 +293,12 @@ async function applyChange(
 
     if (!payload.completed) {
       await client.query(
-        "DELETE FROM routine_checks WHERE sync_space_id = $1 AND routine_id = $2 AND check_date = $3",
-        [spaceId, payload.routineId, payload.date],
+        `DELETE FROM routine_checks
+         WHERE sync_space_id = $1
+           AND routine_id = $2
+           AND check_date = $3
+           AND updated_at <= $4`,
+        [spaceId, payload.routineId, payload.date, updatedAt],
       );
       return;
     }
@@ -304,7 +308,8 @@ async function applyChange(
        VALUES ($1, $2, $3, $4, $5)
        ON CONFLICT (sync_space_id, routine_id, check_date) DO UPDATE
        SET updated_at = EXCLUDED.updated_at,
-           last_modified_by = EXCLUDED.last_modified_by`,
+           last_modified_by = EXCLUDED.last_modified_by
+       WHERE routine_checks.updated_at <= EXCLUDED.updated_at`,
       [spaceId, payload.routineId, payload.date, updatedAt, deviceId],
     );
   }
