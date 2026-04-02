@@ -16,10 +16,20 @@ const DEFAULT_FOCUS_MINUTES: i64 = 50;
 const DEFAULT_BREAK_MINUTES: i64 = 10;
 const DEFAULT_SYNC_SERVER_URL: &str = "http://localhost:8787";
 const DEFAULT_DEVICE_NAME: &str = "Daily Check macOS";
+const DEFAULT_PROGRESS_UNIT: &str = "회";
+const DEFAULT_PROGRESS_TARGET: i64 = 100;
+const DEFAULT_PROGRESS_STEP: i64 = 10;
 
 #[derive(Clone)]
 pub struct AppState {
     pub db_path: PathBuf,
+}
+
+#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProgressEntry {
+    pub date: String,
+    pub value: i64,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -27,13 +37,20 @@ pub struct AppState {
 pub struct RoutineRecord {
     pub id: String,
     pub title: String,
+    #[serde(rename = "type")]
+    pub routine_type: String,
     pub frequency: String,
     pub weekday_mask: String,
     pub reminder: String,
     pub focus_minutes: i64,
     pub break_minutes: i64,
     pub accent: String,
+    pub target_value: Option<i64>,
+    pub unit: Option<String>,
+    pub step_value: Option<i64>,
+    pub quick_adjust_values: Vec<i64>,
     pub completed_dates: Vec<String>,
+    pub progress_entries: Vec<ProgressEntry>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -77,10 +94,17 @@ pub struct SyncActionResponse {
 #[serde(rename_all = "camelCase")]
 pub struct RoutineInput {
     pub title: String,
+    #[serde(rename = "type")]
+    pub routine_type: String,
     pub frequency: String,
     pub weekday_mask: String,
     pub reminder: String,
     pub accent: String,
+    pub target_value: Option<i64>,
+    pub unit: Option<String>,
+    pub step_value: Option<i64>,
+    #[serde(default)]
+    pub quick_adjust_values: Vec<i64>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -88,10 +112,17 @@ pub struct RoutineInput {
 pub struct RoutineUpdateInput {
     pub id: String,
     pub title: String,
+    #[serde(rename = "type")]
+    pub routine_type: String,
     pub frequency: String,
     pub weekday_mask: String,
     pub reminder: String,
     pub accent: String,
+    pub target_value: Option<i64>,
+    pub unit: Option<String>,
+    pub step_value: Option<i64>,
+    #[serde(default)]
+    pub quick_adjust_values: Vec<i64>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -100,6 +131,14 @@ pub struct TimerUpdateInput {
     pub id: String,
     pub focus_minutes: i64,
     pub break_minutes: i64,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ProgressUpdateInput {
+    pub routine_id: String,
+    pub date: String,
+    pub value: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -121,12 +160,19 @@ struct RemoteSnapshot {
 struct RemoteRoutine {
     id: String,
     title: String,
+    #[serde(rename = "type")]
+    routine_type: String,
     frequency: String,
     weekday_mask: String,
     reminder: String,
     accent: String,
     focus_minutes: i64,
     break_minutes: i64,
+    target_value: Option<i64>,
+    unit: Option<String>,
+    step_value: Option<i64>,
+    #[serde(default)]
+    quick_adjust_values: Vec<i64>,
     updated_at: String,
     deleted_at: Option<String>,
 }
@@ -137,6 +183,7 @@ struct RemoteRoutineCheck {
     routine_id: String,
     date: String,
     completed: bool,
+    progress_value: Option<i64>,
     updated_at: String,
 }
 
@@ -200,13 +247,22 @@ struct OutboxRow {
 #[derive(Debug)]
 struct LocalRoutineSyncPayload {
     title: String,
+    routine_type: String,
     frequency: String,
     weekday_mask: String,
     reminder: String,
     accent: String,
     focus_minutes: i64,
     break_minutes: i64,
+    target_value: Option<i64>,
+    unit: Option<String>,
+    step_value: Option<i64>,
+    quick_adjust_values: Vec<i64>,
     updated_at: i64,
+}
+
+struct ProgressRoutineMeta {
+    target_value: i64,
 }
 
 struct SyncExecution {
@@ -433,22 +489,28 @@ pub fn create_routine(input: RoutineInput, state: State<AppState>) -> Result<App
     let now = current_timestamp();
     let payload = sanitize_routine_input(input)?;
     let id = Uuid::new_v4().to_string();
+    let quick_adjust_values = encode_quick_adjust_values(&payload.quick_adjust_values);
 
     with_write_transaction(&conn, |conn| {
         conn.execute(
             "INSERT INTO routines (
-          id, title, frequency, monthly_day, weekday_mask, reminder, focus_minutes, break_minutes,
-          accent, is_active, created_at, updated_at, deleted_at
-        ) VALUES (?1, ?2, ?3, NULL, ?4, ?5, ?6, ?7, ?8, 1, ?9, ?9, NULL)",
+          id, title, type, frequency, monthly_day, weekday_mask, reminder, focus_minutes, break_minutes,
+          accent, target_value, unit, step_value, quick_adjust_values, is_active, created_at, updated_at, deleted_at
+        ) VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 1, ?14, ?14, NULL)",
             params![
                 id,
                 payload.title,
+                payload.routine_type,
                 payload.frequency,
                 payload.weekday_mask,
                 payload.reminder,
                 DEFAULT_FOCUS_MINUTES,
                 DEFAULT_BREAK_MINUTES,
                 payload.accent,
+                payload.target_value,
+                payload.unit,
+                payload.step_value,
+                quick_adjust_values,
                 now
             ],
         )
@@ -469,30 +531,46 @@ pub fn update_routine(
     let now = current_timestamp();
     let payload = sanitize_routine_input(RoutineInput {
         title: input.title,
+        routine_type: input.routine_type,
         frequency: input.frequency,
         weekday_mask: input.weekday_mask,
         reminder: input.reminder,
         accent: input.accent,
+        target_value: input.target_value,
+        unit: input.unit,
+        step_value: input.step_value,
+        quick_adjust_values: input.quick_adjust_values,
     })?;
+    let quick_adjust_values = encode_quick_adjust_values(&payload.quick_adjust_values);
 
     with_write_transaction(&conn, |conn| {
         conn.execute(
             "UPDATE routines
          SET title = ?2,
-             frequency = ?3,
-             weekday_mask = ?4,
+             type = ?3,
+             frequency = ?4,
+             weekday_mask = ?5,
              monthly_day = NULL,
-             reminder = ?5,
-             accent = ?6,
-             updated_at = ?7
+             reminder = ?6,
+             accent = ?7,
+             target_value = ?8,
+             unit = ?9,
+             step_value = ?10,
+             quick_adjust_values = ?11,
+             updated_at = ?12
          WHERE id = ?1 AND deleted_at IS NULL",
             params![
                 input.id,
                 payload.title,
+                payload.routine_type,
                 payload.frequency,
                 payload.weekday_mask,
                 payload.reminder,
                 payload.accent,
+                payload.target_value,
+                payload.unit,
+                payload.step_value,
+                quick_adjust_values,
                 now
             ],
         )
@@ -543,6 +621,10 @@ pub fn toggle_routine_check(
     let now = current_timestamp();
 
     with_write_transaction(&conn, |conn| {
+        if get_routine_type(conn, &routine_id).map_err(|error| error.to_string())? != "check" {
+            return Err("체크형 루틴만 완료 토글을 사용할 수 있습니다.".into());
+        }
+
         let exists = conn
             .query_row(
                 "SELECT 1 FROM routine_checks WHERE routine_id = ?1 AND check_date = ?2",
@@ -562,8 +644,8 @@ pub fn toggle_routine_check(
         } else {
             conn
         .execute(
-          "INSERT INTO routine_checks (routine_id, check_date, updated_at) VALUES (?1, ?2, ?3)
-           ON CONFLICT(routine_id, check_date) DO UPDATE SET updated_at = excluded.updated_at",
+          "INSERT INTO routine_checks (routine_id, check_date, completed, progress_value, updated_at) VALUES (?1, ?2, 1, NULL, ?3)
+           ON CONFLICT(routine_id, check_date) DO UPDATE SET completed = excluded.completed, progress_value = excluded.progress_value, updated_at = excluded.updated_at",
           params![routine_id, date, now],
         )
         .map_err(|error| error.to_string())?;
@@ -575,6 +657,55 @@ pub fn toggle_routine_check(
             &routine_id,
             "toggle",
             &json!({ "date": date, "completed": !exists }),
+        )
+        .map_err(|error| error.to_string())?;
+
+        load_snapshot(conn).map_err(|error| error.to_string())
+    })
+}
+
+#[tauri::command]
+pub fn update_routine_progress(
+    input: ProgressUpdateInput,
+    state: State<AppState>,
+) -> Result<AppSnapshot, String> {
+    let conn = open_connection(&state.db_path).map_err(|error| error.to_string())?;
+    let now = current_timestamp();
+
+    with_write_transaction(&conn, |conn| {
+        let meta = get_progress_routine_meta(conn, &input.routine_id).map_err(|error| error.to_string())?;
+        let clamped = input.value.clamp(0, meta.target_value);
+
+        if clamped <= 0 {
+            conn.execute(
+                "DELETE FROM routine_checks WHERE routine_id = ?1 AND check_date = ?2",
+                params![input.routine_id, input.date],
+            )
+            .map_err(|error| error.to_string())?;
+        } else {
+            let completed = clamped >= meta.target_value;
+            conn.execute(
+                "INSERT INTO routine_checks (routine_id, check_date, completed, progress_value, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(routine_id, check_date) DO UPDATE SET
+                   completed = excluded.completed,
+                   progress_value = excluded.progress_value,
+                   updated_at = excluded.updated_at",
+                params![input.routine_id, input.date, completed, clamped, now],
+            )
+            .map_err(|error| error.to_string())?;
+        }
+
+        queue_outbox(
+            conn,
+            "routine_check",
+            &input.routine_id,
+            "progress",
+            &json!({
+              "date": input.date,
+              "completed": clamped >= meta.target_value,
+              "progressValue": clamped
+            }),
         )
         .map_err(|error| error.to_string())?;
 
@@ -787,6 +918,31 @@ fn load_pending_outbox(conn: &Connection) -> Result<Vec<OutboxRow>> {
     Ok(rows)
 }
 
+fn get_routine_type(conn: &Connection, routine_id: &str) -> Result<String> {
+    conn.query_row(
+        "SELECT type FROM routines WHERE id = ?1 AND deleted_at IS NULL",
+        [routine_id],
+        |row| row.get::<_, String>(0),
+    )
+    .context("루틴 유형을 읽지 못했습니다.")
+}
+
+fn get_progress_routine_meta(conn: &Connection, routine_id: &str) -> Result<ProgressRoutineMeta> {
+    let (routine_type, target_value) = conn.query_row(
+        "SELECT type, target_value FROM routines WHERE id = ?1 AND deleted_at IS NULL",
+        [routine_id],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?)),
+    )?;
+
+    if routine_type != "progress" {
+        return Err(anyhow::anyhow!("누적형 루틴만 진행값을 변경할 수 있습니다."));
+    }
+
+    Ok(ProgressRoutineMeta {
+        target_value: target_value.unwrap_or(DEFAULT_PROGRESS_TARGET),
+    })
+}
+
 fn build_sync_event(conn: &Connection, row: &OutboxRow) -> Result<SyncEventRequest> {
     match row.entity_type.as_str() {
         "routine" => {
@@ -820,12 +976,17 @@ fn build_sync_event(conn: &Connection, row: &OutboxRow) -> Result<SyncEventReque
                 },
                 payload: json!({
                   "title": routine.title,
+                  "type": routine.routine_type,
                   "frequency": routine.frequency,
                   "weekdayMask": routine.weekday_mask,
                   "reminder": routine.reminder,
                   "accent": routine.accent,
                   "focusMinutes": routine.focus_minutes,
-                  "breakMinutes": routine.break_minutes
+                  "breakMinutes": routine.break_minutes,
+                  "targetValue": routine.target_value,
+                  "unit": routine.unit,
+                  "stepValue": routine.step_value,
+                  "quickAdjustValues": routine.quick_adjust_values
                 }),
                 updated_at: timestamp_to_iso(routine.updated_at),
             })
@@ -842,12 +1003,20 @@ fn build_sync_event(conn: &Connection, row: &OutboxRow) -> Result<SyncEventReque
                 .get("completed")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
-            let updated_at = if completed {
-                load_routine_check_updated_at(conn, &row.entity_id, &date)?
-                    .unwrap_or(row.created_at)
-            } else {
-                row.created_at
-            };
+            let progress_value = payload.get("progressValue").and_then(Value::as_i64);
+            let local_state = load_routine_check_state(conn, &row.entity_id, &date)?;
+            let updated_at = local_state
+                .as_ref()
+                .map(|state| state.updated_at)
+                .unwrap_or(row.created_at);
+            let next_completed = local_state
+                .as_ref()
+                .map(|state| state.completed)
+                .unwrap_or(completed);
+            let next_progress_value = local_state
+                .as_ref()
+                .and_then(|state| state.progress_value)
+                .or(progress_value);
 
             Ok(SyncEventRequest {
                 event_id: row.id.clone(),
@@ -857,7 +1026,8 @@ fn build_sync_event(conn: &Connection, row: &OutboxRow) -> Result<SyncEventReque
                 payload: json!({
                   "routineId": row.entity_id,
                   "date": date,
-                  "completed": completed
+                  "completed": next_completed,
+                  "progressValue": next_progress_value.unwrap_or(0)
                 }),
                 updated_at: timestamp_to_iso(updated_at),
             })
@@ -872,24 +1042,55 @@ fn load_local_routine_for_sync(
 ) -> Result<LocalRoutineSyncPayload> {
     conn
     .query_row(
-      "SELECT title, frequency, weekday_mask, reminder, accent, focus_minutes, break_minutes, updated_at, deleted_at
+      "SELECT title, type, frequency, weekday_mask, reminder, accent, focus_minutes, break_minutes, target_value, unit, step_value, quick_adjust_values, updated_at
        FROM routines
        WHERE id = ?1",
       [routine_id],
       |row| {
         Ok(LocalRoutineSyncPayload {
           title: row.get(0)?,
-          frequency: row.get(1)?,
-          weekday_mask: row.get(2)?,
-          reminder: row.get(3)?,
-          accent: row.get(4)?,
-          focus_minutes: row.get(5)?,
-          break_minutes: row.get(6)?,
-          updated_at: row.get(7)?,
+          routine_type: row.get(1)?,
+          frequency: row.get(2)?,
+          weekday_mask: row.get(3)?,
+          reminder: row.get(4)?,
+          accent: row.get(5)?,
+          focus_minutes: row.get(6)?,
+          break_minutes: row.get(7)?,
+          target_value: row.get(8)?,
+          unit: row.get(9)?,
+          step_value: row.get(10)?,
+          quick_adjust_values: decode_quick_adjust_values(&row.get::<_, String>(11)?),
+          updated_at: row.get(12)?,
         })
       },
     )
     .context("루틴 동기화 데이터를 읽지 못했습니다.")
+}
+
+struct RoutineCheckState {
+    updated_at: i64,
+    completed: bool,
+    progress_value: Option<i64>,
+}
+
+fn load_routine_check_state(
+    conn: &Connection,
+    routine_id: &str,
+    date: &str,
+) -> Result<Option<RoutineCheckState>> {
+    conn.query_row(
+        "SELECT updated_at, completed, progress_value FROM routine_checks WHERE routine_id = ?1 AND check_date = ?2",
+        params![routine_id, date],
+        |row| {
+            Ok(RoutineCheckState {
+                updated_at: row.get(0)?,
+                completed: row.get(1)?,
+                progress_value: row.get(2)?,
+            })
+        },
+    )
+    .optional()
+    .context("체크 상태를 읽지 못했습니다.")
 }
 
 fn load_routine_check_updated_at(
@@ -897,13 +1098,7 @@ fn load_routine_check_updated_at(
     routine_id: &str,
     date: &str,
 ) -> Result<Option<i64>> {
-    conn.query_row(
-        "SELECT updated_at FROM routine_checks WHERE routine_id = ?1 AND check_date = ?2",
-        params![routine_id, date],
-        |row| row.get::<_, i64>(0),
-    )
-    .optional()
-    .context("체크 시각을 읽지 못했습니다.")
+    Ok(load_routine_check_state(conn, routine_id, date)?.map(|state| state.updated_at))
 }
 
 fn get_local_routine_updated_at(conn: &Connection, routine_id: &str) -> Result<Option<i64>> {
@@ -963,20 +1158,27 @@ fn apply_remote_events(conn: &Connection, events: &[RemoteSyncEvent]) -> Result<
                     .get("breakMinutes")
                     .and_then(Value::as_i64)
                     .unwrap_or(DEFAULT_BREAK_MINUTES);
+                let quick_adjust_values =
+                    encode_quick_adjust_values(&payload.quick_adjust_values);
                 let local_updated_at = get_local_routine_updated_at(conn, &event.entity_id)?;
                 let affected = conn.execute(
           "INSERT INTO routines (
-             id, title, frequency, monthly_day, weekday_mask, reminder, focus_minutes, break_minutes,
-             accent, is_active, created_at, updated_at, deleted_at
-           ) VALUES (?1, ?2, ?3, NULL, ?4, ?5, ?6, ?7, ?8, 1, ?9, ?9, NULL)
+             id, title, type, frequency, monthly_day, weekday_mask, reminder, focus_minutes, break_minutes,
+             accent, target_value, unit, step_value, quick_adjust_values, is_active, created_at, updated_at, deleted_at
+           ) VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 1, ?14, ?14, NULL)
            ON CONFLICT(id) DO UPDATE SET
              title = excluded.title,
+             type = excluded.type,
              frequency = excluded.frequency,
              weekday_mask = excluded.weekday_mask,
              reminder = excluded.reminder,
              focus_minutes = excluded.focus_minutes,
              break_minutes = excluded.break_minutes,
              accent = excluded.accent,
+             target_value = excluded.target_value,
+             unit = excluded.unit,
+             step_value = excluded.step_value,
+             quick_adjust_values = excluded.quick_adjust_values,
              is_active = 1,
              updated_at = excluded.updated_at,
              deleted_at = NULL
@@ -984,12 +1186,17 @@ fn apply_remote_events(conn: &Connection, events: &[RemoteSyncEvent]) -> Result<
           params![
             event.entity_id,
             payload.title,
+            payload.routine_type,
             payload.frequency,
             payload.weekday_mask,
             payload.reminder,
             focus_minutes,
             break_minutes,
             payload.accent,
+            payload.target_value,
+            payload.unit,
+            payload.step_value,
+            quick_adjust_values,
             updated_at
           ],
         )?;
@@ -1017,6 +1224,11 @@ fn apply_remote_events(conn: &Connection, events: &[RemoteSyncEvent]) -> Result<
                     .get("completed")
                     .and_then(Value::as_bool)
                     .unwrap_or(false);
+                let progress_value = event
+                    .payload
+                    .get("progressValue")
+                    .and_then(Value::as_i64)
+                    .filter(|value| *value > 0);
 
                 if routine_id.is_empty() || date.is_empty() {
                     continue;
@@ -1024,13 +1236,16 @@ fn apply_remote_events(conn: &Connection, events: &[RemoteSyncEvent]) -> Result<
 
                 let local_updated_at = load_routine_check_updated_at(conn, routine_id, date)?;
 
-                if completed {
+                if completed || progress_value.is_some() {
                     let affected = conn.execute(
-                        "INSERT INTO routine_checks (routine_id, check_date, updated_at)
-             VALUES (?1, ?2, ?3)
-             ON CONFLICT(routine_id, check_date) DO UPDATE SET updated_at = excluded.updated_at
+                        "INSERT INTO routine_checks (routine_id, check_date, completed, progress_value, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(routine_id, check_date) DO UPDATE SET
+               completed = excluded.completed,
+               progress_value = excluded.progress_value,
+               updated_at = excluded.updated_at
              WHERE COALESCE(routine_checks.updated_at, 0) <= excluded.updated_at",
-                        params![routine_id, date, updated_at],
+                        params![routine_id, date, completed, progress_value, updated_at],
                     )?;
                     if affected > 0 {
                         pulled_count += 1;
@@ -1069,6 +1284,11 @@ fn normalize_remote_routine_payload(payload: &Value) -> Result<RoutineInput> {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string(),
+        routine_type: payload
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or("check")
+            .to_string(),
         frequency: payload
             .get("frequency")
             .and_then(Value::as_str)
@@ -1089,13 +1309,17 @@ fn normalize_remote_routine_payload(payload: &Value) -> Result<RoutineInput> {
             .and_then(Value::as_str)
             .unwrap_or("#ff8b3d")
             .to_string(),
-    })
-    .map(|input| RoutineInput {
-        title: input.title,
-        frequency: input.frequency,
-        weekday_mask: input.weekday_mask,
-        reminder: input.reminder,
-        accent: input.accent,
+        target_value: payload.get("targetValue").and_then(Value::as_i64),
+        unit: payload
+            .get("unit")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        step_value: payload.get("stepValue").and_then(Value::as_i64),
+        quick_adjust_values: payload
+            .get("quickAdjustValues")
+            .and_then(Value::as_array)
+            .map(|values| values.iter().filter_map(Value::as_i64).collect::<Vec<_>>())
+            .unwrap_or_default(),
     })
     .map_err(anyhow::Error::msg)
 }
@@ -1111,34 +1335,45 @@ fn replace_local_snapshot(conn: &Connection, snapshot: &RemoteSnapshot) -> Resul
 
         conn.execute(
             "INSERT INTO routines (
-         id, title, frequency, monthly_day, weekday_mask, reminder, focus_minutes, break_minutes,
-         accent, is_active, created_at, updated_at, deleted_at
-       ) VALUES (?1, ?2, ?3, NULL, ?4, ?5, ?6, ?7, ?8, 1, ?9, ?9, NULL)",
+         id, title, type, frequency, monthly_day, weekday_mask, reminder, focus_minutes, break_minutes,
+         accent, target_value, unit, step_value, quick_adjust_values, is_active, created_at, updated_at, deleted_at
+       ) VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 1, ?14, ?14, NULL)",
             params![
                 routine.id,
                 routine.title,
+                routine.routine_type,
                 routine.frequency,
                 routine.weekday_mask,
                 routine.reminder,
                 routine.focus_minutes,
                 routine.break_minutes,
                 routine.accent,
+                routine.target_value,
+                routine.unit,
+                routine.step_value,
+                encode_quick_adjust_values(&routine.quick_adjust_values),
                 iso_to_timestamp(&routine.updated_at)
             ],
         )?;
     }
 
     for check in &snapshot.routine_checks {
-        if !check.completed {
+        if !check.completed && check.progress_value.unwrap_or(0) <= 0 {
             continue;
         }
 
         conn.execute(
-            "INSERT INTO routine_checks (routine_id, check_date, updated_at) VALUES (?1, ?2, ?3)
-       ON CONFLICT(routine_id, check_date) DO UPDATE SET updated_at = excluded.updated_at",
+            "INSERT INTO routine_checks (routine_id, check_date, completed, progress_value, updated_at)
+       VALUES (?1, ?2, ?3, ?4, ?5)
+       ON CONFLICT(routine_id, check_date) DO UPDATE SET
+         completed = excluded.completed,
+         progress_value = excluded.progress_value,
+         updated_at = excluded.updated_at",
             params![
                 check.routine_id,
                 check.date,
+                check.completed,
+                check.progress_value,
                 iso_to_timestamp(&check.updated_at)
             ],
         )?;
@@ -1164,7 +1399,8 @@ fn ensure_outbox_has_local_snapshot(conn: &Connection) -> Result<()> {
     }
 
     let mut routine_statement = conn.prepare(
-        "SELECT id, title, frequency, weekday_mask, reminder, accent, focus_minutes, break_minutes
+        "SELECT id, title, type, frequency, weekday_mask, reminder, accent, focus_minutes, break_minutes,
+                target_value, unit, step_value, quick_adjust_values
      FROM routines
      WHERE deleted_at IS NULL
      ORDER BY created_at ASC",
@@ -1175,13 +1411,18 @@ fn ensure_outbox_has_local_snapshot(conn: &Connection) -> Result<()> {
             row.get::<_, String>(0)?,
             RoutineInput {
                 title: row.get(1)?,
-                frequency: row.get(2)?,
-                weekday_mask: row.get(3)?,
-                reminder: row.get(4)?,
-                accent: row.get(5)?,
+                routine_type: row.get(2)?,
+                frequency: row.get(3)?,
+                weekday_mask: row.get(4)?,
+                reminder: row.get(5)?,
+                accent: row.get(6)?,
+                target_value: row.get(9)?,
+                unit: row.get(10)?,
+                step_value: row.get(11)?,
+                quick_adjust_values: decode_quick_adjust_values(&row.get::<_, String>(12)?),
             },
-            row.get::<_, i64>(6)?,
             row.get::<_, i64>(7)?,
+            row.get::<_, i64>(8)?,
         ))
     })?;
 
@@ -1189,34 +1430,48 @@ fn ensure_outbox_has_local_snapshot(conn: &Connection) -> Result<()> {
         let (id, payload, focus_minutes, break_minutes) = routine?;
         let action_payload = json!({
           "title": payload.title,
+          "type": payload.routine_type,
           "frequency": payload.frequency,
           "weekdayMask": payload.weekday_mask,
           "reminder": payload.reminder,
           "accent": payload.accent,
           "focusMinutes": focus_minutes,
-          "breakMinutes": break_minutes
+          "breakMinutes": break_minutes,
+          "targetValue": payload.target_value,
+          "unit": payload.unit,
+          "stepValue": payload.step_value,
+          "quickAdjustValues": payload.quick_adjust_values
         });
         queue_outbox(conn, "routine", &id, "create", &action_payload)?;
     }
 
     let mut check_statement = conn.prepare(
-        "SELECT routine_id, check_date
+        "SELECT routine_id, check_date, completed, progress_value
      FROM routine_checks
      ORDER BY updated_at ASC",
     )?;
 
     let checks = check_statement.query_map([], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, bool>(2)?,
+            row.get::<_, Option<i64>>(3)?,
+        ))
     })?;
 
     for check in checks {
-        let (routine_id, date) = check?;
+        let (routine_id, date, completed, progress_value) = check?;
         queue_outbox(
             conn,
             "routine_check",
             &routine_id,
             "toggle",
-            &json!({ "date": date, "completed": true }),
+            &json!({
+              "date": date,
+              "completed": completed,
+              "progressValue": progress_value.unwrap_or(0)
+            }),
         )?;
     }
 
@@ -1250,6 +1505,10 @@ fn run_migrations(conn: &Connection) -> Result<()> {
             "002_weekday_rules",
             include_str!("../migrations/002_weekday_rules.sql"),
         ),
+        (
+            "003_progress_routines",
+            include_str!("../migrations/003_progress_routines.sql"),
+        ),
     ];
 
     for (id, sql) in migrations {
@@ -1268,6 +1527,42 @@ fn run_migrations(conn: &Connection) -> Result<()> {
 
         if id == "002_weekday_rules" && !column_exists(conn, "routines", "weekday_mask")? {
             conn.execute("ALTER TABLE routines ADD COLUMN weekday_mask TEXT", [])?;
+        }
+
+        if id == "003_progress_routines" {
+            if !column_exists(conn, "routines", "type")? {
+                conn.execute(
+                    "ALTER TABLE routines ADD COLUMN type TEXT NOT NULL DEFAULT 'check'",
+                    [],
+                )?;
+            }
+            if !column_exists(conn, "routines", "target_value")? {
+                conn.execute("ALTER TABLE routines ADD COLUMN target_value INTEGER", [])?;
+            }
+            if !column_exists(conn, "routines", "unit")? {
+                conn.execute("ALTER TABLE routines ADD COLUMN unit TEXT", [])?;
+            }
+            if !column_exists(conn, "routines", "step_value")? {
+                conn.execute("ALTER TABLE routines ADD COLUMN step_value INTEGER", [])?;
+            }
+            if !column_exists(conn, "routines", "quick_adjust_values")? {
+                conn.execute(
+                    "ALTER TABLE routines ADD COLUMN quick_adjust_values TEXT NOT NULL DEFAULT '[]'",
+                    [],
+                )?;
+            }
+            if !column_exists(conn, "routine_checks", "completed")? {
+                conn.execute(
+                    "ALTER TABLE routine_checks ADD COLUMN completed INTEGER NOT NULL DEFAULT 1",
+                    [],
+                )?;
+            }
+            if !column_exists(conn, "routine_checks", "progress_value")? {
+                conn.execute(
+                    "ALTER TABLE routine_checks ADD COLUMN progress_value INTEGER",
+                    [],
+                )?;
+            }
         }
 
         conn.execute_batch(sql)?;
@@ -1295,7 +1590,8 @@ fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool> {
 
 fn load_snapshot(conn: &Connection) -> Result<AppSnapshot> {
     let mut routines_stmt = conn.prepare(
-        "SELECT id, title, frequency, weekday_mask, reminder, focus_minutes, break_minutes, accent
+        "SELECT id, title, type, frequency, weekday_mask, reminder, focus_minutes, break_minutes, accent,
+                target_value, unit, step_value, quick_adjust_values
      FROM routines
      WHERE is_active = 1 AND deleted_at IS NULL
      ORDER BY created_at ASC, title ASC",
@@ -1305,13 +1601,19 @@ fn load_snapshot(conn: &Connection) -> Result<AppSnapshot> {
         Ok(RoutineRecord {
             id: row.get(0)?,
             title: row.get(1)?,
-            frequency: row.get(2)?,
-            weekday_mask: row.get(3)?,
-            reminder: row.get(4)?,
-            focus_minutes: row.get(5)?,
-            break_minutes: row.get(6)?,
-            accent: row.get(7)?,
+            routine_type: row.get(2)?,
+            frequency: row.get(3)?,
+            weekday_mask: row.get(4)?,
+            reminder: row.get(5)?,
+            focus_minutes: row.get(6)?,
+            break_minutes: row.get(7)?,
+            accent: row.get(8)?,
+            target_value: row.get(9)?,
+            unit: row.get(10)?,
+            step_value: row.get(11)?,
+            quick_adjust_values: decode_quick_adjust_values(&row.get::<_, String>(12)?),
             completed_dates: Vec::new(),
+            progress_entries: Vec::new(),
         })
     })?;
 
@@ -1324,7 +1626,7 @@ fn load_snapshot(conn: &Connection) -> Result<AppSnapshot> {
 
     if !routine_indexes.is_empty() {
         let mut checks_stmt = conn.prepare(
-            "SELECT routine_checks.routine_id, routine_checks.check_date
+            "SELECT routine_checks.routine_id, routine_checks.check_date, routine_checks.completed, routine_checks.progress_value
        FROM routine_checks
        INNER JOIN routines ON routines.id = routine_checks.routine_id
        WHERE routines.is_active = 1 AND routines.deleted_at IS NULL
@@ -1332,13 +1634,36 @@ fn load_snapshot(conn: &Connection) -> Result<AppSnapshot> {
         )?;
 
         let check_rows = checks_stmt.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, bool>(2)?,
+                row.get::<_, Option<i64>>(3)?,
+            ))
         })?;
 
         for check in check_rows {
-            let (routine_id, check_date) = check?;
+            let (routine_id, check_date, completed, progress_value) = check?;
             if let Some(index) = routine_indexes.get(&routine_id) {
-                routines[*index].completed_dates.push(check_date);
+                if let Some(value) = progress_value.filter(|value| *value > 0) {
+                    routines[*index].progress_entries.push(ProgressEntry {
+                        date: check_date.clone(),
+                        value,
+                    });
+                }
+
+                let is_completed = if routines[*index].routine_type == "progress" {
+                    progress_value.unwrap_or(0)
+                        >= routines[*index]
+                            .target_value
+                            .unwrap_or(DEFAULT_PROGRESS_TARGET)
+                } else {
+                    completed
+                };
+
+                if is_completed {
+                    routines[*index].completed_dates.push(check_date);
+                }
             }
         }
     }
@@ -1442,10 +1767,24 @@ fn queue_outbox<T: Serialize>(
     Ok(())
 }
 
+fn encode_quick_adjust_values(values: &[i64]) -> String {
+    serde_json::to_string(values).unwrap_or_else(|_| "[]".into())
+}
+
+fn decode_quick_adjust_values(raw: &str) -> Vec<i64> {
+    serde_json::from_str::<Vec<i64>>(raw).unwrap_or_default()
+}
+
 fn sanitize_routine_input(input: RoutineInput) -> Result<RoutineInput, String> {
     if input.title.trim().is_empty() {
         return Err("루틴 이름을 입력하세요.".into());
     }
+
+    let routine_type = match input.routine_type.trim() {
+        "check" => "check".to_string(),
+        "progress" => "progress".to_string(),
+        _ => return Err("루틴 유형을 다시 확인하세요.".into()),
+    };
 
     let normalized_frequency = match input.frequency.as_str() {
         "Daily" | "Weekdays" | "Weekends" | "CustomDays" => input.frequency,
@@ -1486,16 +1825,62 @@ fn sanitize_routine_input(input: RoutineInput) -> Result<RoutineInput, String> {
         _ => unreachable!(),
     };
 
+    let accent = if input.accent.trim().is_empty() {
+        "#ff8b3d".into()
+    } else {
+        input.accent
+    };
+
+    let (target_value, unit, step_value, quick_adjust_values) = if routine_type == "progress" {
+        let target_value = input
+            .target_value
+            .filter(|value| *value > 0)
+            .ok_or_else(|| "누적형 루틴은 목표값이 필요합니다.".to_string())?;
+        let unit = input
+            .unit
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| DEFAULT_PROGRESS_UNIT.to_string());
+        let step_value = input
+            .step_value
+            .filter(|value| *value > 0)
+            .unwrap_or(DEFAULT_PROGRESS_STEP);
+
+        let mut normalized_values: Vec<i64> = input
+            .quick_adjust_values
+            .into_iter()
+            .filter(|value| *value != 0)
+            .map(|value| value.clamp(-target_value, target_value))
+            .collect();
+
+        if normalized_values.is_empty() {
+            normalized_values = vec![-step_value, step_value, step_value * 2];
+        }
+
+        normalized_values.sort_unstable();
+        normalized_values.dedup();
+
+        (
+            Some(target_value),
+            Some(unit),
+            Some(step_value),
+            normalized_values,
+        )
+    } else {
+        (None, None, None, Vec::new())
+    };
+
     Ok(RoutineInput {
         title: input.title.trim().to_string(),
+        routine_type,
         frequency: normalized_frequency,
         weekday_mask,
         reminder,
-        accent: if input.accent.trim().is_empty() {
-            "#ff8b3d".into()
-        } else {
-            input.accent
-        },
+        accent,
+        target_value,
+        unit,
+        step_value,
+        quick_adjust_values,
     })
 }
 
@@ -1514,57 +1899,88 @@ fn seed_routines_if_needed(conn: &Connection) -> Result<()> {
     for routine in [
         RoutineInput {
             title: "아침 계획".into(),
+            routine_type: "check".into(),
             frequency: "Weekdays".into(),
             weekday_mask: "0111110".into(),
             reminder: "09:10".into(),
             accent: "#f97316".into(),
+            target_value: None,
+            unit: None,
+            step_value: None,
+            quick_adjust_values: Vec::new(),
         },
         RoutineInput {
             title: "스트레칭".into(),
+            routine_type: "check".into(),
             frequency: "Daily".into(),
             weekday_mask: "1111111".into(),
             reminder: "14:00".into(),
             accent: "#2dd4bf".into(),
+            target_value: None,
+            unit: None,
+            step_value: None,
+            quick_adjust_values: Vec::new(),
         },
         RoutineInput {
-            title: "받은 편지함 정리".into(),
-            frequency: "CustomDays".into(),
-            weekday_mask: "0101010".into(),
-            reminder: "17:30".into(),
-            accent: "#facc15".into(),
+            title: "물 마시기".into(),
+            routine_type: "progress".into(),
+            frequency: "Daily".into(),
+            weekday_mask: "1111111".into(),
+            reminder: "11:00".into(),
+            accent: "#38bdf8".into(),
+            target_value: Some(2000),
+            unit: Some("ml".into()),
+            step_value: Some(250),
+            quick_adjust_values: vec![-250, 250, 500],
         },
         RoutineInput {
             title: "주말 회고".into(),
+            routine_type: "check".into(),
             frequency: "Weekends".into(),
             weekday_mask: "1000001".into(),
             reminder: "18:20".into(),
-            accent: "#38bdf8".into(),
+            accent: "#a78bfa".into(),
+            target_value: None,
+            unit: None,
+            step_value: None,
+            quick_adjust_values: Vec::new(),
         },
     ] {
+        let routine = sanitize_routine_input(routine).map_err(anyhow::Error::msg)?;
         let routine_payload = json!({
           "title": routine.title.clone(),
+          "type": routine.routine_type.clone(),
           "frequency": routine.frequency.clone(),
           "weekdayMask": routine.weekday_mask.clone(),
           "reminder": routine.reminder.clone(),
           "accent": routine.accent.clone(),
           "focusMinutes": DEFAULT_FOCUS_MINUTES,
-          "breakMinutes": DEFAULT_BREAK_MINUTES
+          "breakMinutes": DEFAULT_BREAK_MINUTES,
+          "targetValue": routine.target_value,
+          "unit": routine.unit,
+          "stepValue": routine.step_value,
+          "quickAdjustValues": routine.quick_adjust_values
         });
         let id = Uuid::new_v4().to_string();
         conn.execute(
             "INSERT INTO routines (
-        id, title, frequency, monthly_day, weekday_mask, reminder, focus_minutes, break_minutes,
-        accent, is_active, created_at, updated_at, deleted_at
-      ) VALUES (?1, ?2, ?3, NULL, ?4, ?5, ?6, ?7, ?8, 1, ?9, ?9, NULL)",
+        id, title, type, frequency, monthly_day, weekday_mask, reminder, focus_minutes, break_minutes,
+        accent, target_value, unit, step_value, quick_adjust_values, is_active, created_at, updated_at, deleted_at
+      ) VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 1, ?14, ?14, NULL)",
             params![
                 id,
                 routine.title,
+                routine.routine_type,
                 routine.frequency,
                 routine.weekday_mask,
                 routine.reminder,
                 DEFAULT_FOCUS_MINUTES,
                 DEFAULT_BREAK_MINUTES,
                 routine.accent,
+                routine.target_value,
+                routine.unit,
+                routine.step_value,
+                encode_quick_adjust_values(&routine.quick_adjust_values),
                 now
             ],
         )?;
@@ -1696,6 +2112,38 @@ mod tests {
         let deleted_snapshot = load_snapshot(&conn).expect("load snapshot after delete");
         assert!(deleted_snapshot.routines.is_empty());
         assert_eq!(pending_outbox_count(&conn), 4);
+    }
+
+    #[test]
+    fn progress_routine_tracks_value_and_completion() {
+        let db = TestDb::new();
+        let conn = db.connection().expect("db init");
+        reset_local_test_state(&conn).expect("reset local state");
+
+        let routine_id = "water-progress";
+        insert_progress_routine_event(&conn, routine_id, "물 마시기", 2_000, "ml", 250, 1_710_000_050)
+            .expect("create progress routine");
+
+        update_progress_event(&conn, routine_id, "2026-03-30", 750, 1_710_000_051)
+            .expect("partial progress");
+        let partial_snapshot = load_snapshot(&conn).expect("load partial snapshot");
+        assert!(partial_snapshot.routines[0].completed_dates.is_empty());
+        assert_eq!(
+            partial_snapshot.routines[0].progress_entries,
+            vec![ProgressEntry {
+                date: "2026-03-30".into(),
+                value: 750
+            }]
+        );
+
+        update_progress_event(&conn, routine_id, "2026-03-30", 2_000, 1_710_000_052)
+            .expect("full progress");
+        let completed_snapshot = load_snapshot(&conn).expect("load completed snapshot");
+        assert_eq!(
+            completed_snapshot.routines[0].completed_dates,
+            vec!["2026-03-30".to_string()]
+        );
+        assert_eq!(pending_outbox_count(&conn), 3);
     }
 
     #[test]
@@ -1938,27 +2386,37 @@ mod tests {
     ) -> Result<()> {
         let payload = sanitize_routine_input(RoutineInput {
             title: title.to_string(),
+            routine_type: "check".to_string(),
             frequency: "Weekdays".to_string(),
             weekday_mask: "0111110".to_string(),
             reminder: "09:00".to_string(),
             accent: "#f97316".to_string(),
+            target_value: None,
+            unit: None,
+            step_value: None,
+            quick_adjust_values: Vec::new(),
         })
         .map_err(anyhow::Error::msg)?;
 
         conn.execute(
             "INSERT INTO routines (
-         id, title, frequency, monthly_day, weekday_mask, reminder, focus_minutes, break_minutes,
-         accent, is_active, created_at, updated_at, deleted_at
-       ) VALUES (?1, ?2, ?3, NULL, ?4, ?5, ?6, ?7, ?8, 1, ?9, ?9, NULL)",
+         id, title, type, frequency, monthly_day, weekday_mask, reminder, focus_minutes, break_minutes,
+         accent, target_value, unit, step_value, quick_adjust_values, is_active, created_at, updated_at, deleted_at
+       ) VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 1, ?14, ?14, NULL)",
             params![
                 id,
                 payload.title,
+                payload.routine_type,
                 payload.frequency,
                 payload.weekday_mask,
                 payload.reminder,
                 DEFAULT_FOCUS_MINUTES,
                 DEFAULT_BREAK_MINUTES,
                 payload.accent,
+                payload.target_value,
+                payload.unit,
+                payload.step_value,
+                encode_quick_adjust_values(&payload.quick_adjust_values),
                 updated_at
             ],
         )?;
@@ -1970,12 +2428,17 @@ mod tests {
             "create",
             &json!({
               "title": title,
+              "type": "check",
               "frequency": "Weekdays",
               "weekdayMask": "0111110",
               "reminder": "09:00",
               "accent": "#f97316",
               "focusMinutes": DEFAULT_FOCUS_MINUTES,
-              "breakMinutes": DEFAULT_BREAK_MINUTES
+              "breakMinutes": DEFAULT_BREAK_MINUTES,
+              "targetValue": Value::Null,
+              "unit": Value::Null,
+              "stepValue": Value::Null,
+              "quickAdjustValues": []
             }),
             updated_at,
         )
@@ -1987,9 +2450,22 @@ mod tests {
         title: &str,
         updated_at: i64,
     ) -> Result<()> {
-        let (frequency, weekday_mask, reminder, accent, focus_minutes, break_minutes) = conn
+        let (
+            routine_type,
+            frequency,
+            weekday_mask,
+            reminder,
+            accent,
+            focus_minutes,
+            break_minutes,
+            target_value,
+            unit,
+            step_value,
+            quick_adjust_values,
+        ) = conn
             .query_row(
-                "SELECT frequency, weekday_mask, reminder, accent, focus_minutes, break_minutes
+                "SELECT type, frequency, weekday_mask, reminder, accent, focus_minutes, break_minutes,
+                target_value, unit, step_value, quick_adjust_values
        FROM routines
        WHERE id = ?1",
                 [id],
@@ -1999,8 +2475,13 @@ mod tests {
                         row.get::<_, String>(1)?,
                         row.get::<_, String>(2)?,
                         row.get::<_, String>(3)?,
-                        row.get::<_, i64>(4)?,
+                        row.get::<_, String>(4)?,
                         row.get::<_, i64>(5)?,
+                        row.get::<_, i64>(6)?,
+                        row.get::<_, Option<i64>>(7)?,
+                        row.get::<_, Option<String>>(8)?,
+                        row.get::<_, Option<i64>>(9)?,
+                        row.get::<_, String>(10)?,
                     ))
                 },
             )?;
@@ -2020,12 +2501,17 @@ mod tests {
             "update",
             &json!({
               "title": title,
+              "type": routine_type,
               "frequency": frequency,
               "weekdayMask": weekday_mask,
               "reminder": reminder,
               "accent": accent,
               "focusMinutes": focus_minutes,
-              "breakMinutes": break_minutes
+              "breakMinutes": break_minutes,
+              "targetValue": target_value,
+              "unit": unit,
+              "stepValue": step_value,
+              "quickAdjustValues": decode_quick_adjust_values(&quick_adjust_values)
             }),
             updated_at,
         )
@@ -2040,9 +2526,12 @@ mod tests {
     ) -> Result<()> {
         if completed {
             conn.execute(
-                "INSERT INTO routine_checks (routine_id, check_date, updated_at)
-         VALUES (?1, ?2, ?3)
-         ON CONFLICT(routine_id, check_date) DO UPDATE SET updated_at = excluded.updated_at",
+                "INSERT INTO routine_checks (routine_id, check_date, completed, progress_value, updated_at)
+         VALUES (?1, ?2, 1, NULL, ?3)
+         ON CONFLICT(routine_id, check_date) DO UPDATE SET
+           completed = excluded.completed,
+           progress_value = excluded.progress_value,
+           updated_at = excluded.updated_at",
                 params![routine_id, date, updated_at],
             )?;
         } else {
@@ -2059,7 +2548,123 @@ mod tests {
             "toggle",
             &json!({
               "date": date,
-              "completed": completed
+              "completed": completed,
+              "progressValue": 0
+            }),
+            updated_at,
+        )
+    }
+
+    fn insert_progress_routine_event(
+        conn: &Connection,
+        id: &str,
+        title: &str,
+        target_value: i64,
+        unit: &str,
+        step_value: i64,
+        updated_at: i64,
+    ) -> Result<()> {
+        let payload = sanitize_routine_input(RoutineInput {
+            title: title.to_string(),
+            routine_type: "progress".to_string(),
+            frequency: "Daily".to_string(),
+            weekday_mask: "1111111".to_string(),
+            reminder: "10:00".to_string(),
+            accent: "#38bdf8".to_string(),
+            target_value: Some(target_value),
+            unit: Some(unit.to_string()),
+            step_value: Some(step_value),
+            quick_adjust_values: vec![-step_value, step_value, step_value * 2],
+        })
+        .map_err(anyhow::Error::msg)?;
+
+        conn.execute(
+            "INSERT INTO routines (
+         id, title, type, frequency, monthly_day, weekday_mask, reminder, focus_minutes, break_minutes,
+         accent, target_value, unit, step_value, quick_adjust_values, is_active, created_at, updated_at, deleted_at
+       ) VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 1, ?14, ?14, NULL)",
+            params![
+                id,
+                payload.title,
+                payload.routine_type,
+                payload.frequency,
+                payload.weekday_mask,
+                payload.reminder,
+                DEFAULT_FOCUS_MINUTES,
+                DEFAULT_BREAK_MINUTES,
+                payload.accent,
+                payload.target_value,
+                payload.unit,
+                payload.step_value,
+                encode_quick_adjust_values(&payload.quick_adjust_values),
+                updated_at
+            ],
+        )?;
+
+        insert_outbox_row(
+            conn,
+            "routine",
+            id,
+            "create",
+            &json!({
+              "title": title,
+              "type": "progress",
+              "frequency": "Daily",
+              "weekdayMask": "1111111",
+              "reminder": "10:00",
+              "accent": "#38bdf8",
+              "focusMinutes": DEFAULT_FOCUS_MINUTES,
+              "breakMinutes": DEFAULT_BREAK_MINUTES,
+              "targetValue": target_value,
+              "unit": unit,
+              "stepValue": step_value,
+              "quickAdjustValues": [-step_value, step_value, step_value * 2]
+            }),
+            updated_at,
+        )
+    }
+
+    fn update_progress_event(
+        conn: &Connection,
+        routine_id: &str,
+        date: &str,
+        progress_value: i64,
+        updated_at: i64,
+    ) -> Result<()> {
+        let target_value = conn.query_row(
+            "SELECT target_value FROM routines WHERE id = ?1",
+            [routine_id],
+            |row| row.get::<_, Option<i64>>(0),
+        )?
+        .unwrap_or(DEFAULT_PROGRESS_TARGET);
+        let completed = progress_value >= target_value;
+
+        if progress_value <= 0 {
+            conn.execute(
+                "DELETE FROM routine_checks WHERE routine_id = ?1 AND check_date = ?2",
+                params![routine_id, date],
+            )?;
+        } else {
+            conn.execute(
+                "INSERT INTO routine_checks (routine_id, check_date, completed, progress_value, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(routine_id, check_date) DO UPDATE SET
+           completed = excluded.completed,
+           progress_value = excluded.progress_value,
+           updated_at = excluded.updated_at",
+                params![routine_id, date, completed, progress_value, updated_at],
+            )?;
+        }
+
+        insert_outbox_row(
+            conn,
+            "routine_check",
+            routine_id,
+            "progress",
+            &json!({
+              "date": date,
+              "completed": completed,
+              "progressValue": progress_value
             }),
             updated_at,
         )

@@ -2,8 +2,8 @@ mod db;
 
 use db::{
     bootstrap_app, create_routine, delete_routine, regenerate_sync_key, sync_now,
-    toggle_routine_check, unlock_app, update_routine, update_routine_timer, update_sync_server_url,
-    AppState,
+    toggle_routine_check, unlock_app, update_routine, update_routine_progress,
+    update_routine_timer, update_sync_server_url, AppState,
 };
 use tauri::Manager;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -86,6 +86,7 @@ pub fn run() {
             update_routine,
             delete_routine,
             toggle_routine_check,
+            update_routine_progress,
             update_routine_timer
         ])
         .run(tauri::generate_context!())

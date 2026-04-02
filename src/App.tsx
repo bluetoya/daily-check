@@ -11,20 +11,34 @@ import {
 import { Fragment, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 
 type Frequency = "Daily" | "Weekdays" | "Weekends" | "CustomDays";
+type RoutineType = "check" | "progress";
 type TabId = "today" | "weekly" | "stats" | "pomodoro" | "routines" | "settings";
 type TimerPhase = "focus" | "break";
 type NotificationPermissionStatus = PermissionState | "default" | "checking" | "unavailable";
+type ReminderMeridiem = "AM" | "PM";
+type PlanetVariant = "gas" | "storm" | "crater" | "ice" | "dune";
+
+type ProgressEntry = {
+  date: string;
+  value: number;
+};
 
 type Routine = {
   id: string;
   title: string;
+  type: RoutineType;
   frequency: Frequency;
   weekdayMask: string;
   reminder: string;
   focusMinutes: number;
   breakMinutes: number;
   accent: string;
+  targetValue?: number | null;
+  unit?: string | null;
+  stepValue?: number | null;
+  quickAdjustValues: number[];
   completedDates: string[];
+  progressEntries: ProgressEntry[];
 };
 
 type AppSnapshot = {
@@ -58,10 +72,14 @@ type SyncActionResponse = {
 
 type RoutineDraft = {
   title: string;
+  type: RoutineType;
   frequency: Frequency;
   weekdayMask: string;
   reminder: string;
   accent: string;
+  targetValue: string;
+  unit: string;
+  stepValue: string;
 };
 
 type TimerDraft = {
@@ -99,37 +117,65 @@ type SyncStatus = {
   conflictCount: number;
 };
 
-const weekdayLabels = ["일", "월", "화", "수", "목", "금", "토"];
+const weekdayLabels = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const ROUTINE_REMINDER_ID_BASE = 300_000_000;
 const ROUTINE_REMINDER_ID_RANGE = 200_000_000;
 const POMODORO_NOTIFICATION_ID_BASE = 700_000_000;
 const TEST_NOTIFICATION_ID = 700_000_100;
 const tabs: Array<{ id: TabId; label: string }> = [
-  { id: "today", label: "오늘" },
-  { id: "weekly", label: "주간 체크" },
-  { id: "stats", label: "통계" },
-  { id: "pomodoro", label: "뽀모도로" },
-  { id: "routines", label: "루틴" },
-  { id: "settings", label: "설정" },
+  { id: "today", label: "Bridge" },
+  { id: "weekly", label: "Orbit Grid" },
+  { id: "stats", label: "Telemetry" },
+  { id: "pomodoro", label: "Burn Cycle" },
+  { id: "routines", label: "Protocols" },
+  { id: "settings", label: "Systems" },
 ];
 const frequencyOptions: Array<{ value: Frequency; label: string }> = [
-  { value: "Daily", label: "매일" },
-  { value: "Weekdays", label: "평일만" },
-  { value: "Weekends", label: "주말만" },
-  { value: "CustomDays", label: "요일 선택" },
+  { value: "Daily", label: "Daily Orbit" },
+  { value: "Weekdays", label: "Work Orbit" },
+  { value: "Weekends", label: "Weekend Orbit" },
+  { value: "CustomDays", label: "Custom Orbit" },
 ];
+const progressUnitOptions = [
+  { value: "ml", label: "Milliliters (ml)" },
+  { value: "L", label: "Liters (L)" },
+  { value: "분", label: "Minutes" },
+  { value: "페이지", label: "Pages" },
+  { value: "회", label: "Repeats" },
+  { value: "걸음", label: "Steps" },
+  { value: "개", label: "Count" },
+];
+const reminderHourOptions = Array.from({ length: 12 }, (_, index) => index + 1);
+const reminderMinuteOptions = Array.from({ length: 6 }, (_, index) => index * 10);
 const colorOptions = [
-  { value: "#f97316", label: "주황" },
-  { value: "#2dd4bf", label: "민트" },
-  { value: "#facc15", label: "노랑" },
-  { value: "#38bdf8", label: "하늘" },
-  { value: "#fb7185", label: "분홍" },
-  { value: "#a78bfa", label: "보라" },
-  { value: "#22c55e", label: "초록" },
-  { value: "#ef4444", label: "빨강" },
-  { value: "#06b6d4", label: "청록" },
-  { value: "#f59e0b", label: "호박" },
+  { value: "#f97316", label: "Amber" },
+  { value: "#2dd4bf", label: "Mint" },
+  { value: "#facc15", label: "Solar" },
+  { value: "#38bdf8", label: "Sky" },
+  { value: "#fb7185", label: "Rose" },
+  { value: "#a78bfa", label: "Violet" },
+  { value: "#22c55e", label: "Verdant" },
+  { value: "#ef4444", label: "Red Shift" },
+  { value: "#06b6d4", label: "Cyan" },
+  { value: "#f59e0b", label: "Nova" },
 ];
+const tabDescriptions: Record<TabId, string> = {
+  today: "Review today's mission queue and keep every protocol in view.",
+  weekly: "Scan the week's orbit board and spot completed passes at a glance.",
+  stats: "Read streaks, completion, and long-range mission telemetry.",
+  pomodoro: "Manage focus burns and recovery drifts from the flight deck.",
+  routines: "Tune protocol cadence, progress targets, and reminder windows.",
+  settings: "Check uplink health, alert channels, and system controls.",
+};
+const planetVariants: PlanetVariant[] = ["gas", "storm", "crater", "ice", "dune"];
+
+function isAccentAvailable(routines: Routine[], accent: string, excludedRoutineId?: string | null) {
+  return !routines.some((routine) => routine.id !== excludedRoutineId && routine.accent === accent);
+}
+
+function findAvailableAccent(routines: Routine[], excludedRoutineId?: string | null) {
+  return colorOptions.find((option) => isAccentAvailable(routines, option.value, excludedRoutineId))?.value ?? null;
+}
 
 function isNativeRuntime() {
   const runtime = window as unknown as Record<string, unknown>;
@@ -219,6 +265,10 @@ function maskForFrequency(frequency: Frequency) {
   }
 }
 
+function isProgressRoutine(routine: Routine) {
+  return routine.type === "progress";
+}
+
 function toggleMaskDay(mask: string, index: number) {
   const next = mask.split("");
   next[index] = next[index] === "1" ? "0" : "1";
@@ -230,7 +280,50 @@ function frequencyText(frequency: Frequency) {
 }
 
 function reminderText(reminder: string) {
-  return reminder ? reminder : "알림 끔";
+  return reminder ? reminder : "No ping";
+}
+
+function getProgressEntryValue(
+  routine: Routine,
+  date: string,
+  progressEntryMap?: ReadonlyMap<string, number>,
+) {
+  if (!isProgressRoutine(routine)) {
+    return 0;
+  }
+
+  return progressEntryMap?.get(date) ?? routine.progressEntries.find((entry) => entry.date === date)?.value ?? 0;
+}
+
+function getRoutineProgressPercent(routine: Routine, value: number) {
+  const targetValue = routine.targetValue ?? 0;
+  if (!targetValue) {
+    return 0;
+  }
+
+  return Math.max(0, Math.min(100, Math.round((value / targetValue) * 100)));
+}
+
+function getProgressCellLevel(percent: number) {
+  if (percent >= 100) {
+    return 3;
+  }
+
+  if (percent >= 50) {
+    return 2;
+  }
+
+  if (percent > 0) {
+    return 1;
+  }
+
+  return 0;
+}
+
+function formatProgressLabel(routine: Routine, value: number) {
+  const targetValue = routine.targetValue ?? 0;
+  const unit = routine.unit ?? "";
+  return `${value} / ${targetValue}${unit ? ` ${unit}` : ""}`;
 }
 
 function isNavigatorOnline() {
@@ -240,7 +333,7 @@ function isNavigatorOnline() {
 function buildInitialSyncStatus(): SyncStatus {
   return {
     tone: "idle",
-    message: "변경사항은 로컬에 먼저 저장되고, 온라인이 되면 자동으로 동기화됩니다.",
+    message: "Local logs stay primary. The uplink resumes automatically when the channel returns.",
     pushedCount: 0,
     pulledCount: 0,
     conflictCount: 0,
@@ -250,25 +343,25 @@ function buildInitialSyncStatus(): SyncStatus {
 function syncStatusToneText(tone: SyncStatusTone) {
   switch (tone) {
     case "syncing":
-      return "동기화 중";
+      return "Uplink Live";
     case "success":
-      return "정상";
+      return "Nominal";
     case "warning":
-      return "확인 필요";
+      return "Check Signal";
     case "error":
-      return "실패";
+      return "Link Lost";
     default:
-      return "대기";
+      return "Standby";
   }
 }
 
 function buildSyncStatusMessage(response: SyncActionResponse) {
   if (response.conflictCount > 0) {
-    return `동기화 완료. 서버 변경 ${response.pulledCount}건을 반영했고 충돌 ${response.conflictCount}건은 더 최신인 로컬 값을 유지했습니다.`;
+    return `Uplink complete. Applied ${response.pulledCount} remote updates and kept ${response.conflictCount} newer local decisions.`;
   }
 
   if (response.pushedCount === 0 && response.pulledCount === 0) {
-    return "동기화할 새 변경이 없습니다.";
+    return "No fresh telemetry to sync.";
   }
 
   const segments: string[] = [];
@@ -279,7 +372,7 @@ function buildSyncStatusMessage(response: SyncActionResponse) {
     segments.push(`반영 ${response.pulledCount}건`);
   }
 
-  return `동기화 완료. ${segments.join(", ")} 처리했습니다.`;
+  return `Uplink complete. ${segments.join(", ")} processed.`;
 }
 
 function parseReminderTime(reminder: string) {
@@ -292,6 +385,24 @@ function parseReminderTime(reminder: string) {
     hour: Number(matched[1]),
     minute: Number(matched[2]),
   };
+}
+
+function toReminderControl(reminder: string) {
+  const parsed = parseReminderTime(reminder || "00:00") ?? { hour: 0, minute: 0 };
+  const meridiem: ReminderMeridiem = parsed.hour >= 12 ? "PM" : "AM";
+  const hour12 = parsed.hour % 12 === 0 ? 12 : parsed.hour % 12;
+
+  return {
+    hour12,
+    minute: parsed.minute,
+    meridiem,
+  };
+}
+
+function toReminderValue(hour12: number, minute: number, meridiem: ReminderMeridiem) {
+  const normalizedHour = hour12 % 12 + (meridiem === "PM" ? 12 : 0);
+
+  return `${`${normalizedHour}`.padStart(2, "0")}:${`${minute}`.padStart(2, "0")}`;
 }
 
 function weekdayToNotificationDay(weekdayIndex: number) {
@@ -319,22 +430,26 @@ function isManagedReminderId(id: number) {
 function notificationPermissionText(status: NotificationPermissionStatus) {
   switch (status) {
     case "granted":
-      return "권한 허용됨";
+      return "Channel Open";
     case "denied":
-      return "권한 거부됨";
+      return "Channel Closed";
     case "prompt":
-      return "권한 요청 전";
+      return "Awaiting Clearance";
     case "prompt-with-rationale":
-      return "권한 설명 필요";
+      return "Needs Briefing";
     case "default":
-      return "권한 요청 전";
+      return "Awaiting Clearance";
     case "checking":
-      return "권한 확인 중";
+      return "Scanning Channel";
     case "unavailable":
-      return "미지원 환경";
+      return "Unavailable";
     default:
-      return "상태 확인 중";
+      return "Checking";
   }
+}
+
+function planetVariantForSeed(seed: string): PlanetVariant {
+  return planetVariants[hashNotificationSeed(seed) % planetVariants.length] ?? "gas";
 }
 
 function buildRoutineReminderSpecs(routines: Routine[]) {
@@ -350,12 +465,12 @@ function buildRoutineReminderSpecs(routines: Routine[]) {
       continue;
     }
 
-    const body = `${routine.title} 루틴을 체크할 시간입니다.`;
+    const body = `Time to log ${routine.title} in the mission queue.`;
 
     if (routine.frequency === "Daily") {
       specs.push({
         id: buildManagedReminderId(routine.id, 0),
-        title: "Daily Check 리마인더",
+        title: "Daily Check reminder",
         body,
         schedule: Schedule.interval({
           hour: reminder.hour,
@@ -376,7 +491,7 @@ function buildRoutineReminderSpecs(routines: Routine[]) {
 
       specs.push({
         id: buildManagedReminderId(routine.id, index + 1),
-        title: "Daily Check 리마인더",
+        title: "Daily Check reminder",
         body,
         schedule: Schedule.interval({
           weekday: weekdayToNotificationDay(index),
@@ -475,20 +590,28 @@ function computeRoutineStreak(
 function buildEmptyDraft(): RoutineDraft {
   return {
     title: "",
+    type: "check",
     frequency: "Daily",
     weekdayMask: maskForFrequency("Daily"),
-    reminder: "09:00",
+    reminder: "00:00",
     accent: colorOptions[0].value,
+    targetValue: "",
+    unit: "",
+    stepValue: "",
   };
 }
 
 function buildDraftFromRoutine(routine: Routine): RoutineDraft {
   return {
     title: routine.title,
+    type: routine.type,
     frequency: routine.frequency,
     weekdayMask: routine.weekdayMask,
     reminder: routine.reminder,
     accent: routine.accent,
+    targetValue: routine.targetValue ? String(routine.targetValue) : "",
+    unit: routine.unit ?? "",
+    stepValue: routine.stepValue ? String(routine.stepValue) : "",
   };
 }
 
@@ -512,47 +635,77 @@ function buildFallbackSnapshot(anchorDate: Date): AppSnapshot {
     routines: [
       {
         id: "planning",
-        title: "아침 계획",
+        title: "Morning Brief",
+        type: "check",
         frequency: "Weekdays",
         weekdayMask: "0111110",
         reminder: "09:10",
         focusMinutes: 50,
         breakMinutes: 10,
         accent: "#f97316",
+        targetValue: null,
+        unit: null,
+        stepValue: null,
+        quickAdjustValues: [],
         completedDates: [weekDays[0].key, weekDays[1].key, weekDays[3].key, weekDays[4].key],
+        progressEntries: [],
       },
       {
         id: "stretch",
-        title: "스트레칭",
+        title: "Mobility Drift",
+        type: "check",
         frequency: "Daily",
         weekdayMask: "1111111",
         reminder: "14:00",
         focusMinutes: 50,
         breakMinutes: 10,
         accent: "#2dd4bf",
+        targetValue: null,
+        unit: null,
+        stepValue: null,
+        quickAdjustValues: [],
         completedDates: weekDays.slice(0, 5).map((day) => day.key),
+        progressEntries: [],
       },
       {
-        id: "inbox",
-        title: "받은 편지함 정리",
-        frequency: "CustomDays",
-        weekdayMask: "0101010",
-        reminder: "17:30",
+        id: "water",
+        title: "Hydration Orbit",
+        type: "progress",
+        frequency: "Daily",
+        weekdayMask: "1111111",
+        reminder: "11:00",
         focusMinutes: 50,
         breakMinutes: 10,
-        accent: "#facc15",
-        completedDates: [weekDays[0].key, weekDays[2].key],
+        accent: "#38bdf8",
+        targetValue: 2000,
+        unit: "ml",
+        stepValue: 250,
+        quickAdjustValues: [-250, 250, 500],
+        completedDates: [weekDays[0].key, weekDays[3].key],
+        progressEntries: [
+          { date: weekDays[0].key, value: 2000 },
+          { date: weekDays[1].key, value: 1250 },
+          { date: weekDays[2].key, value: 750 },
+          { date: weekDays[3].key, value: 2000 },
+          { date: weekDays[4].key, value: 1500 },
+        ],
       },
       {
         id: "weekend",
-        title: "주말 회고",
+        title: "Weekend Debrief",
+        type: "check",
         frequency: "Weekends",
         weekdayMask: "1000001",
         reminder: "18:20",
         focusMinutes: 50,
         breakMinutes: 10,
-        accent: "#38bdf8",
+        accent: "#a78bfa",
+        targetValue: null,
+        unit: null,
+        stepValue: null,
+        quickAdjustValues: [],
         completedDates: [weekDays[5].key],
+        progressEntries: [],
       },
     ],
   };
@@ -620,6 +773,33 @@ function TabIcon({ tab, active }: { tab: TabId; active: boolean }) {
   }
 }
 
+function PlanetBadge({
+  accent,
+  size = "label",
+  ringed = false,
+  intense = false,
+  variant = "gas",
+}: {
+  accent: string;
+  size?: "label" | "chip" | "swatch";
+  ringed?: boolean;
+  intense?: boolean;
+  variant?: PlanetVariant;
+}) {
+  return (
+    <span
+      className={`planet-badge planet-badge-${size} ${ringed ? "planet-badge-ringed" : ""} ${
+        intense ? "planet-badge-intense" : ""
+      }`}
+      style={{ "--planet": accent } as CSSProperties}
+    >
+      <span className={`planet-badge-core planet-badge-variant-${variant}`}>
+        <span className="planet-badge-surface" />
+      </span>
+    </span>
+  );
+}
+
 function App() {
   const [snapshot, setSnapshot] = useState<AppSnapshot>(() => buildFallbackSnapshot(new Date()));
   const [runtimeMode, setRuntimeMode] = useState<"native" | "demo">("demo");
@@ -627,7 +807,7 @@ function App() {
   const [syncKey, setSyncKey] = useState<string | null>(null);
   const [inputValue, setInputValue] = useState("");
   const [isUnlocked, setIsUnlocked] = useState(false);
-  const [loginMessage, setLoginMessage] = useState("로컬 저장소를 준비하고 있습니다.");
+  const [loginMessage, setLoginMessage] = useState("Warming the local archive.");
   const [actionMessage, setActionMessage] = useState("");
   const [activeTab, setActiveTab] = useState<TabId>("today");
   const [activeRoutineId, setActiveRoutineId] = useState<string | null>(null);
@@ -648,6 +828,7 @@ function App() {
     useState<NotificationPermissionStatus>("checking");
   const [isOnline, setIsOnline] = useState(() => isNavigatorOnline());
   const [syncStatus, setSyncStatus] = useState<SyncStatus>(() => buildInitialSyncStatus());
+  const [progressDrafts, setProgressDrafts] = useState<Record<string, number>>({});
   const syncInFlightRef = useRef(false);
 
   const weekDays = useMemo(() => buildWeekDays(now), [now]);
@@ -658,13 +839,42 @@ function App() {
     () => new Map(routines.map((routine) => [routine.id, new Set(routine.completedDates)])),
     [routines],
   );
+  const progressEntryMaps = useMemo(
+    () =>
+      new Map(
+        routines.map((routine) => [
+          routine.id,
+          new Map(routine.progressEntries.map((entry) => [entry.date, entry.value])),
+        ]),
+      ),
+    [routines],
+  );
   const activeRoutine = routines.find((routine) => routine.id === activeRoutineId) ?? routines[0] ?? null;
   const editorRoutine = routines.find((routine) => routine.id === editorRoutineId) ?? null;
-  const currentTabLabel = tabs.find((tab) => tab.id === activeTab)?.label ?? "오늘";
+  const currentTabLabel = tabs.find((tab) => tab.id === activeTab)?.label ?? "Bridge";
+  const currentTabDescription = tabDescriptions[activeTab];
+  const reminderControl = useMemo(() => toReminderControl(draft.reminder || "00:00"), [draft.reminder]);
+  const missionDateLabel = useMemo(
+    () =>
+      now.toLocaleDateString("en-US", {
+        month: "short",
+        day: "numeric",
+        weekday: "short",
+      }),
+    [now],
+  );
   const weekKeys = useMemo(() => weekDays.map((day) => day.key), [weekDays]);
   const todayRoutines = useMemo(
     () => routines.filter((routine) => isScheduledOnWeekday(routine, now.getDay())),
     [routines, now],
+  );
+  const todayCheckRoutines = useMemo(
+    () => todayRoutines.filter((routine) => !isProgressRoutine(routine)),
+    [todayRoutines],
+  );
+  const todayProgressRoutines = useMemo(
+    () => todayRoutines.filter((routine) => isProgressRoutine(routine)),
+    [todayRoutines],
   );
   const reminderSignature = useMemo(
     () =>
@@ -733,6 +943,10 @@ function App() {
   }, []);
 
   useEffect(() => {
+    setProgressDrafts({});
+  }, [todayKey]);
+
+  useEffect(() => {
     const updateOnlineState = () => setIsOnline(isNavigatorOnline());
     window.addEventListener("online", updateOnlineState);
     window.addEventListener("offline", updateOnlineState);
@@ -760,8 +974,8 @@ function App() {
         setSnapshot(next);
         setLoginMessage(
           next.hasSyncKey
-            ? "저장된 동기화 키를 입력하세요."
-            : "처음 입력한 값이 이 기기의 동기화 키로 저장됩니다.",
+            ? "Enter the stored sync key to reopen this bridge."
+            : "The first key you enter becomes this device's uplink key.",
         );
       } catch {
         if (cancelled) {
@@ -770,7 +984,7 @@ function App() {
 
         setRuntimeMode("demo");
         setSnapshot(buildFallbackSnapshot(new Date()));
-        setLoginMessage("브라우저 미리보기 모드입니다.");
+        setLoginMessage("Preview mode active. Running on local bridge only.");
       } finally {
         if (!cancelled) {
           setIsBootstrapping(false);
@@ -868,8 +1082,8 @@ function App() {
           setTimerPhase((phase) => (phase === "focus" ? "break" : "focus"));
           setActionMessage(
             completedPhase === "focus"
-              ? "집중 시간이 끝났습니다. 휴식 타이머로 전환했어요."
-              : "휴식이 끝났습니다. 다시 집중할 시간입니다.",
+              ? "Focus burn complete. Switching to recovery drift."
+              : "Recovery drift complete. Time to reignite focus.",
           );
           void sendPomodoroNotification(completedPhase);
           return 0;
@@ -939,8 +1153,8 @@ function App() {
       tone: "warning",
       message:
         snapshot.outboxCount > 0
-          ? `오프라인 상태입니다. 변경 ${snapshot.outboxCount}개를 로컬에 보관 중입니다.`
-          : "오프라인 상태입니다. 연결이 돌아오면 자동으로 동기화합니다.",
+          ? `Offline. Holding ${snapshot.outboxCount} local updates until uplink returns.`
+          : "Offline. Auto uplink resumes when the signal returns.",
       pushedCount: 0,
       pulledCount: 0,
       conflictCount: 0,
@@ -973,6 +1187,7 @@ function App() {
 
   function applySnapshot(nextSnapshot: AppSnapshot) {
     setSnapshot(nextSnapshot);
+    setProgressDrafts({});
   }
 
   function applyLocalSnapshot(mutator: (current: AppSnapshot) => AppSnapshot) {
@@ -987,14 +1202,14 @@ function App() {
   async function runSync(mode: "manual" | "auto" | "reconnect" = "manual") {
     if (runtimeMode !== "native") {
       if (mode === "manual") {
-        setActionMessage("미리보기 모드에서는 서버 동기화를 실행할 수 없습니다.");
+        setActionMessage("Preview mode cannot open a live uplink.");
       }
       return;
     }
 
     if (!syncKey) {
       if (mode === "manual") {
-        setActionMessage("동기화 키를 먼저 설정하세요.");
+        setActionMessage("Set the sync key before opening uplink.");
       }
       return;
     }
@@ -1002,8 +1217,8 @@ function App() {
     if (!isNavigatorOnline()) {
       const message =
         snapshot.outboxCount > 0
-          ? `오프라인 상태입니다. 변경 ${snapshot.outboxCount}개를 로컬에 보관 중입니다.`
-          : "오프라인 상태입니다. 연결이 돌아오면 자동으로 동기화합니다.";
+          ? `Offline. Holding ${snapshot.outboxCount} local updates until uplink returns.`
+          : "Offline. Auto uplink resumes when the signal returns.";
       setSyncStatus({
         tone: "warning",
         message,
@@ -1025,7 +1240,7 @@ function App() {
     setSyncStatus((current) => ({
       ...current,
       tone: "syncing",
-      message: mode === "manual" ? "서버와 동기화 중입니다." : "백그라운드에서 동기화 중입니다.",
+      message: mode === "manual" ? "Opening live uplink." : "Background uplink in progress.",
     }));
 
     try {
@@ -1046,7 +1261,7 @@ function App() {
         setActionMessage(nextMessage);
       }
     } catch (error) {
-      const nextMessage = `동기화에 실패했습니다. ${String(error)}`;
+      const nextMessage = `Uplink failed. ${String(error)}`;
       setSyncStatus({
         tone: "error",
         message: nextMessage,
@@ -1107,11 +1322,11 @@ function App() {
       return;
     }
 
-    const title = completedPhase === "focus" ? "집중 시간이 끝났습니다." : "휴식이 끝났습니다.";
+    const title = completedPhase === "focus" ? "Focus burn complete." : "Recovery drift complete.";
     const body =
       completedPhase === "focus"
-        ? `${activeRoutine?.title ?? "선택한 루틴"} 휴식으로 전환할 시간입니다.`
-        : `${activeRoutine?.title ?? "선택한 루틴"} 다시 집중을 시작할 시간입니다.`;
+        ? `${activeRoutine?.title ?? "Selected protocol"} is ready for recovery drift.`
+        : `${activeRoutine?.title ?? "Selected protocol"} is ready to reignite focus.`;
 
     sendNotification({
       id: POMODORO_NOTIFICATION_ID_BASE + (completedPhase === "focus" ? 1 : 2),
@@ -1125,7 +1340,7 @@ function App() {
   async function handleUnlock() {
     const trimmed = inputValue.trim();
     if (!trimmed) {
-      setLoginMessage("동기화 키를 입력하세요.");
+      setLoginMessage("Enter a sync key to unlock the bridge.");
       return;
     }
 
@@ -1140,7 +1355,7 @@ function App() {
             applySnapshot(response.snapshot);
           }
           setSyncStatus({
-            tone: response.message.includes("오프라인") ? "warning" : "success",
+            tone: /offline|오프라인/i.test(response.message) ? "warning" : "success",
             message: response.message,
             pushedCount: 0,
             pulledCount: 0,
@@ -1159,17 +1374,17 @@ function App() {
     if (!syncKey) {
       setSyncKey(trimmed);
       setIsUnlocked(true);
-      setLoginMessage("미리보기 키를 저장했습니다.");
+      setLoginMessage("Preview uplink key stored.");
       return;
     }
 
     if (trimmed === syncKey) {
       setIsUnlocked(true);
-      setLoginMessage("키가 일치합니다.");
+      setLoginMessage("Bridge unlocked.");
       return;
     }
 
-    setLoginMessage("키가 일치하지 않습니다.");
+    setLoginMessage("Sync key mismatch.");
   }
 
   async function handleRegenerate() {
@@ -1182,7 +1397,7 @@ function App() {
         setLoginMessage(response.message);
         setSyncStatus({
           tone: "warning",
-          message: "동기화 키를 바꿨습니다. 다른 기기에서도 새 키를 다시 입력해야 합니다.",
+          message: "Sync key rotated. Re-enter the new key on every linked device.",
           pushedCount: 0,
           pulledCount: 0,
           conflictCount: 0,
@@ -1198,13 +1413,13 @@ function App() {
     const nextKey = generateSyncKey();
     setSyncKey(nextKey);
     setInputValue(nextKey);
-    setLoginMessage("미리보기 키를 재생성했습니다.");
+    setLoginMessage("Preview uplink key rotated.");
   }
 
   async function handleSaveServerUrl() {
     const trimmed = serverUrlDraft.trim();
     if (!trimmed) {
-      setActionMessage("동기화 서버 주소를 입력하세요.");
+      setActionMessage("Enter an uplink endpoint.");
       return;
     }
 
@@ -1215,12 +1430,12 @@ function App() {
         applySnapshot(next);
         setSyncStatus({
           tone: "idle",
-          message: "새 서버 주소를 저장했습니다. 필요하면 지금 동기화를 눌러 바로 확인할 수 있습니다.",
+          message: "Endpoint saved. Run Sync Now whenever you want an immediate uplink check.",
           pushedCount: 0,
           pulledCount: 0,
           conflictCount: 0,
         });
-        setActionMessage("동기화 서버 주소를 저장했습니다.");
+        setActionMessage("Uplink endpoint saved.");
       } catch (error) {
         setActionMessage(String(error));
       } finally {
@@ -1233,7 +1448,7 @@ function App() {
       ...current,
       syncServerUrl: trimmed,
     }));
-    setActionMessage("동기화 서버 주소를 저장했습니다.");
+    setActionMessage("Uplink endpoint saved.");
   }
 
   async function handleSyncNow() {
@@ -1244,31 +1459,31 @@ function App() {
     const permission = await syncNotificationPermission(true);
     setActionMessage(
       permission === "granted"
-        ? "알림 권한을 허용했습니다."
-        : "알림 권한이 허용되지 않았습니다. 시스템 설정을 확인해 주세요.",
+        ? "Alert channel cleared."
+        : "Alert channel still blocked. Check system settings.",
     );
   }
 
   async function handleSendTestNotification() {
     if (runtimeMode !== "native") {
-      setActionMessage("미리보기 모드에서는 테스트 알림을 보낼 수 없습니다.");
+      setActionMessage("Preview mode cannot send a live test ping.");
       return;
     }
 
     const permission = await syncNotificationPermission(true);
     if (permission !== "granted") {
-      setActionMessage("알림 권한이 필요합니다.");
+      setActionMessage("Alert channel clearance is required.");
       return;
     }
 
     sendNotification({
       id: TEST_NOTIFICATION_ID,
-      title: "Daily Check 테스트 알림",
-      body: "루틴 리마인더와 종료 알림이 이 형태로 표시됩니다.",
+      title: "Daily Check test ping",
+      body: "Routine pings and burn-cycle alerts will appear in this format.",
       group: "test-notifications",
       silent: !snapshot.soundEnabled,
     });
-    setActionMessage("테스트 알림을 보냈습니다.");
+    setActionMessage("Test ping sent.");
   }
 
   async function persistRoutineToggle(routineId: string, date: string) {
@@ -1301,11 +1516,80 @@ function App() {
     }));
   }
 
+  async function persistRoutineProgress(routine: Routine, date: string, value: number) {
+    const targetValue = routine.targetValue ?? 0;
+    const nextValue = Math.max(0, Math.min(targetValue, Math.round(value)));
+    const draftKey = `${routine.id}:${date}`;
+
+    if (runtimeMode === "native") {
+      try {
+        const next = await invoke<AppSnapshot>("update_routine_progress", {
+          input: {
+            routineId: routine.id,
+            date,
+            value: nextValue,
+          },
+        });
+        applySnapshot(next);
+      } catch (error) {
+        setActionMessage(String(error));
+        setProgressDrafts((current) => {
+          const nextDrafts = { ...current };
+          delete nextDrafts[draftKey];
+          return nextDrafts;
+        });
+      }
+      return;
+    }
+
+    applyLocalSnapshot((current) => ({
+      ...current,
+      outboxCount: current.outboxCount + 1,
+      routines: current.routines.map((entry) => {
+        if (entry.id !== routine.id) {
+          return entry;
+        }
+
+        const completedDates = new Set(entry.completedDates);
+        const nextEntries = entry.progressEntries.filter((progress) => progress.date !== date);
+
+        if (nextValue > 0) {
+          nextEntries.push({ date, value: nextValue });
+        }
+
+        if (nextValue >= (entry.targetValue ?? 0)) {
+          completedDates.add(date);
+        } else {
+          completedDates.delete(date);
+        }
+
+        return {
+          ...entry,
+          completedDates: [...completedDates].sort(),
+          progressEntries: nextEntries.sort((left, right) => left.date.localeCompare(right.date)),
+        };
+      }),
+    }));
+
+    setProgressDrafts((current) => {
+      const nextDrafts = { ...current };
+      delete nextDrafts[draftKey];
+      return nextDrafts;
+    });
+  }
+
   function startCreateRoutine() {
+    const nextAccent = findAvailableAccent(routines);
     setActiveTab("routines");
     setIsCreatingRoutine(true);
     setEditorRoutineId(null);
-    setDraft(buildEmptyDraft());
+    setDraft({
+      ...buildEmptyDraft(),
+      accent: nextAccent ?? colorOptions[0].value,
+    });
+    if (!nextAccent) {
+      setActionMessage("No open planet signature left. Reassign an existing one first.");
+    }
   }
 
   function startEditRoutine(routine: Routine) {
@@ -1324,14 +1608,48 @@ function App() {
     }));
   }
 
+  function updateRoutineType(nextType: RoutineType) {
+    setDraft((current) => {
+      if (nextType === "progress") {
+        return {
+          ...current,
+          type: nextType,
+          targetValue: current.targetValue || "2000",
+          unit: current.unit || "ml",
+          stepValue: current.stepValue || "250",
+        };
+      }
+
+      return {
+        ...current,
+        type: nextType,
+        targetValue: "",
+        unit: "",
+        stepValue: "",
+      };
+    });
+  }
+
+  function updateReminderControl(partial: Partial<{ hour12: number; minute: number; meridiem: ReminderMeridiem }>) {
+    const next = {
+      ...reminderControl,
+      ...partial,
+    };
+
+    setDraft((current) => ({
+      ...current,
+      reminder: toReminderValue(next.hour12, next.minute, next.meridiem),
+    }));
+  }
+
   async function handleSaveTimer() {
     if (!activeRoutine) {
-      setActionMessage("뽀모도로를 연결할 루틴을 먼저 선택하세요.");
+      setActionMessage("Select a protocol before linking the burn cycle.");
       return;
     }
 
     if (timerDraft.focusMinutes < 10 || timerDraft.breakMinutes < 5) {
-      setActionMessage("집중은 10분 이상, 휴식은 5분 이상이어야 합니다.");
+      setActionMessage("Focus burn must be at least 10 minutes and recovery drift at least 5.");
       return;
     }
 
@@ -1362,7 +1680,7 @@ function App() {
         }));
       }
 
-      setActionMessage("뽀모도로 시간을 저장했습니다.");
+      setActionMessage("Burn-cycle timing saved.");
     } catch (error) {
       setActionMessage(String(error));
     } finally {
@@ -1372,14 +1690,14 @@ function App() {
 
   async function handleStartTimer() {
     if (!activeRoutine) {
-      setActionMessage("뽀모도로를 연결할 루틴을 먼저 선택하세요.");
+      setActionMessage("Select a protocol before linking the burn cycle.");
       return;
     }
 
     if (runtimeMode === "native" && notificationPermission !== "granted" && notificationPermission !== "denied") {
       const permission = await syncNotificationPermission(true);
       if (permission !== "granted") {
-        setActionMessage("알림 권한이 없어 종료 알림 없이 타이머를 시작합니다.");
+        setActionMessage("Alert channel is closed. Starting without an end-of-cycle ping.");
       }
     }
 
@@ -1388,24 +1706,63 @@ function App() {
 
   async function handleSaveRoutine() {
     if (!draft.title.trim()) {
-      setActionMessage("루틴 이름을 입력하세요.");
+      setActionMessage("Enter a protocol name.");
       return;
     }
 
     if (draft.frequency === "CustomDays" && !draft.weekdayMask.includes("1")) {
-      setActionMessage("요일 선택을 쓴다면 최소 하루는 골라야 합니다.");
+      setActionMessage("Choose at least one orbit day when using Custom Orbit.");
       return;
     }
+
+    const stepValue = draft.type === "progress" ? Number(draft.stepValue) : null;
+    const targetValue = draft.type === "progress" ? Number(draft.targetValue) : null;
+    const unit = draft.type === "progress" ? draft.unit.trim() : null;
+
+    if (draft.type === "progress") {
+      if (!targetValue || targetValue <= 0) {
+        setActionMessage("Progress tracks need a target value.");
+        return;
+      }
+
+      if (!unit) {
+        setActionMessage("Progress tracks need a unit.");
+        return;
+      }
+
+      if (!stepValue || stepValue <= 0) {
+        setActionMessage("Progress tracks need a slider step.");
+        return;
+      }
+    }
+
+    if (!isAccentAvailable(routines, draft.accent, isCreatingRoutine ? null : editorRoutineId)) {
+      setActionMessage("That planet signature is already assigned.");
+      return;
+    }
+
+    const routinePayload = {
+      title: draft.title.trim(),
+      type: draft.type,
+      frequency: draft.frequency,
+      weekdayMask: draft.frequency === "CustomDays" ? draft.weekdayMask : maskForFrequency(draft.frequency),
+      reminder: draft.reminder,
+      accent: draft.accent,
+      targetValue: draft.type === "progress" ? targetValue : null,
+      unit: draft.type === "progress" ? unit : null,
+      stepValue: draft.type === "progress" ? stepValue : null,
+      quickAdjustValues: [],
+    };
 
     setIsWorking(true);
     try {
       if (runtimeMode === "native") {
         const next = isCreatingRoutine
-          ? await invoke<AppSnapshot>("create_routine", { input: draft })
+          ? await invoke<AppSnapshot>("create_routine", { input: routinePayload })
           : await invoke<AppSnapshot>("update_routine", {
               input: {
                 id: editorRoutineId,
-                ...draft,
+                ...routinePayload,
               },
             });
 
@@ -1422,20 +1779,26 @@ function App() {
           setActiveRoutineId(selectedRoutine.id);
         }
 
-        setActionMessage(isCreatingRoutine ? "새 루틴을 저장했습니다." : "루틴을 수정했습니다.");
+        setActionMessage(isCreatingRoutine ? "New protocol created." : "Protocol updated.");
       } else {
         const next = applyLocalSnapshot((current) => {
           if (isCreatingRoutine) {
             const routine: Routine = {
               id: createLocalId(),
-              title: draft.title,
-              frequency: draft.frequency,
-              weekdayMask: draft.frequency === "CustomDays" ? draft.weekdayMask : maskForFrequency(draft.frequency),
-              reminder: draft.reminder,
+              title: routinePayload.title,
+              type: routinePayload.type,
+              frequency: routinePayload.frequency,
+              weekdayMask: routinePayload.weekdayMask,
+              reminder: routinePayload.reminder,
               focusMinutes: 50,
               breakMinutes: 10,
-              accent: draft.accent,
+              accent: routinePayload.accent,
+              targetValue: routinePayload.targetValue,
+              unit: routinePayload.unit,
+              stepValue: routinePayload.stepValue,
+              quickAdjustValues: routinePayload.quickAdjustValues,
               completedDates: [],
+              progressEntries: [],
             };
 
             return {
@@ -1452,14 +1815,26 @@ function App() {
               routine.id === editorRoutineId
                 ? {
                     ...routine,
-                    title: draft.title,
-                    frequency: draft.frequency,
-                    weekdayMask:
-                      draft.frequency === "CustomDays"
-                        ? draft.weekdayMask
-                        : maskForFrequency(draft.frequency),
-                    reminder: draft.reminder,
-                    accent: draft.accent,
+                    title: routinePayload.title,
+                    type: routinePayload.type,
+                    frequency: routinePayload.frequency,
+                    weekdayMask: routinePayload.weekdayMask,
+                    reminder: routinePayload.reminder,
+                    accent: routinePayload.accent,
+                    targetValue: routinePayload.targetValue,
+                    unit: routinePayload.unit,
+                    stepValue: routinePayload.stepValue,
+                    quickAdjustValues: routinePayload.quickAdjustValues,
+                    completedDates:
+                      routinePayload.type === "progress"
+                        ? routine.completedDates.filter((date) => {
+                            const value =
+                              routine.progressEntries.find((entry) => entry.date === date)?.value ?? 0;
+                            return value >= (routinePayload.targetValue ?? 0);
+                          })
+                        : routine.completedDates,
+                    progressEntries:
+                      routinePayload.type === "progress" ? routine.progressEntries : [],
                   }
                 : routine,
             ),
@@ -1478,7 +1853,7 @@ function App() {
           setActiveRoutineId(selectedRoutine.id);
         }
 
-        setActionMessage(isCreatingRoutine ? "새 루틴을 저장했습니다." : "루틴을 수정했습니다.");
+        setActionMessage(isCreatingRoutine ? "New protocol created." : "Protocol updated.");
       }
     } catch (error) {
       setActionMessage(String(error));
@@ -1490,7 +1865,7 @@ function App() {
   async function handleDeleteRoutine() {
     const routineId = editorRoutine?.id ?? editorRoutineId;
     if (!routineId) {
-      setActionMessage("삭제할 루틴을 먼저 선택하세요.");
+      setActionMessage("Select a protocol to delete.");
       return;
     }
 
@@ -1499,7 +1874,7 @@ function App() {
       if (runtimeMode === "native") {
         const next = await invoke<AppSnapshot>("delete_routine", { routineId });
         if (next.routines.some((routine) => routine.id === routineId)) {
-          throw new Error("루틴 삭제가 반영되지 않았습니다.");
+          throw new Error("Protocol deletion did not apply.");
         }
         applySnapshot(next);
       } else {
@@ -1509,14 +1884,14 @@ function App() {
           routines: current.routines.filter((routine) => routine.id !== routineId),
         }));
         if (next.routines.some((routine) => routine.id === routineId)) {
-          throw new Error("루틴 삭제가 반영되지 않았습니다.");
+          throw new Error("Protocol deletion did not apply.");
         }
       }
 
       setIsCreatingRoutine(false);
       setEditorRoutineId(null);
       setDraft(buildEmptyDraft());
-      setActionMessage("루틴을 삭제했습니다.");
+      setActionMessage("Protocol deleted.");
     } catch (error) {
       setActionMessage(String(error));
     } finally {
@@ -1524,57 +1899,233 @@ function App() {
     }
   }
 
+  function renderTodayRoutineCard(routine: Routine) {
+    const completed = completedDateSets.get(routine.id)?.has(todayKey) ?? false;
+    const draftKey = `${routine.id}:${todayKey}`;
+    const sliderValue =
+      progressDrafts[draftKey] ?? getProgressEntryValue(routine, todayKey, progressEntryMaps.get(routine.id));
+    const progressPercent = getRoutineProgressPercent(routine, sliderValue);
+
+    return (
+      <article className={`routine-card ${isProgressRoutine(routine) ? "progress-routine-card" : ""}`} key={routine.id}>
+        {isProgressRoutine(routine) ? (
+          <>
+            <div className="progress-routine-head">
+              <div className="routine-copy progress-routine-copy">
+                <strong>{routine.title}</strong>
+                <span>
+                  {frequencyText(routine.frequency)} · {reminderText(routine.reminder)}
+                </span>
+              </div>
+
+              <button
+                className="ghost-button tiny-button progress-edit-button"
+                onClick={() => startEditRoutine(routine)}
+              >
+                편집
+              </button>
+            </div>
+
+            <div className="progress-routine-meta">
+              <strong>{formatProgressLabel(routine, sliderValue)}</strong>
+              <span>{progressPercent}% 달성</span>
+            </div>
+
+            <input
+              aria-label={`${routine.title} 진행률`}
+              className="progress-slider"
+              type="range"
+              min={0}
+              max={routine.targetValue ?? 100}
+              step={routine.stepValue ?? 1}
+              value={sliderValue}
+              onChange={(event) =>
+                setProgressDrafts((current) => ({
+                  ...current,
+                  [draftKey]: Number(event.target.value),
+                }))
+              }
+              onPointerUp={(event) =>
+                void persistRoutineProgress(routine, todayKey, Number(event.currentTarget.value))
+              }
+              onKeyUp={(event) =>
+                void persistRoutineProgress(routine, todayKey, Number(event.currentTarget.value))
+              }
+              style={
+                {
+                  "--accent": routine.accent,
+                  "--progress": `${progressPercent}%`,
+                } as CSSProperties
+              }
+            />
+          </>
+        ) : (
+          <>
+            <input
+              aria-label={`${routine.title} 완료 상태 토글`}
+              checked={completed}
+              className="check-toggle"
+              onChange={() => persistRoutineToggle(routine.id, todayKey)}
+              style={{ accentColor: routine.accent } as CSSProperties}
+              type="checkbox"
+            />
+
+            <div className="routine-copy">
+              <strong>{routine.title}</strong>
+              <span>
+                {frequencyText(routine.frequency)} · {reminderText(routine.reminder)}
+              </span>
+            </div>
+
+            <div className="row-actions">
+              <button className="tiny-button" onClick={() => startEditRoutine(routine)}>
+                편집
+              </button>
+            </div>
+          </>
+        )}
+      </article>
+    );
+  }
+
+  function renderTodayRoutineGroup(title: string, routinesForGroup: Routine[]) {
+    if (routinesForGroup.length === 0) {
+      return null;
+    }
+
+    return (
+      <section className="routine-group" key={title}>
+        <div className="routine-group-head">
+          <strong>{title}</strong>
+          <span>{routinesForGroup.length}</span>
+        </div>
+        <div className="routine-list">{routinesForGroup.map((routine) => renderTodayRoutineCard(routine))}</div>
+      </section>
+    );
+  }
+
   function renderTodayScreen() {
     return (
       <div className="screen-stack">
         <section className="summary-strip">
           <article className="mini-card panel">
-            <span>오늘 완료율</span>
+            <span>Mission Yield</span>
             <strong>{todayCompletion}%</strong>
           </article>
           <article className="mini-card panel">
-            <span>오늘 루틴</span>
-            <strong>{todayRoutines.length}개</strong>
+            <span>Assigned Protocols</span>
+            <strong>{todayRoutines.length}</strong>
           </article>
         </section>
 
         <section className="panel block-panel">
           <div className="section-head">
-            <h2>오늘 할 루틴</h2>
+            <h2>Mission Queue</h2>
             <button className="ghost-button small-button" onClick={startCreateRoutine}>
-              새 루틴
+              Add Protocol
             </button>
           </div>
 
+          {todayRoutines.length > 0 ? (
+            <div className="today-routine-groups">
+              {renderTodayRoutineGroup("Binary Checks", todayCheckRoutines)}
+              {renderTodayRoutineGroup("Progress Tracks", todayProgressRoutines)}
+            </div>
+          ) : null}
+
           <div className="routine-list">
             {todayRoutines.length === 0 ? (
-              <p className="empty-copy">오늘 체크할 루틴이 없습니다.</p>
+              <p className="empty-copy">No protocols scheduled for this cycle.</p>
             ) : (
               todayRoutines.map((routine) => {
                 const completed = completedDateSets.get(routine.id)?.has(todayKey) ?? false;
+                const draftKey = `${routine.id}:${todayKey}`;
+                const sliderValue =
+                  progressDrafts[draftKey] ??
+                  getProgressEntryValue(routine, todayKey, progressEntryMaps.get(routine.id));
+                const progressPercent = getRoutineProgressPercent(routine, sliderValue);
                 return (
-                  <article className="routine-card" key={routine.id}>
-                    <input
-                      aria-label={`${routine.title} 완료 상태 토글`}
-                      checked={completed}
-                      className="check-toggle"
-                      onChange={() => persistRoutineToggle(routine.id, todayKey)}
-                      style={{ accentColor: routine.accent } as CSSProperties}
-                      type="checkbox"
-                    />
+                  <article
+                    className={`routine-card ${isProgressRoutine(routine) ? "progress-routine-card" : ""}`}
+                    key={routine.id}
+                  >
+                    {isProgressRoutine(routine) ? (
+                      <>
+                        <div className="progress-routine-head">
+                          <div className="routine-copy progress-routine-copy">
+                            <strong>{routine.title}</strong>
+                            <span>
+                              {frequencyText(routine.frequency)} · {reminderText(routine.reminder)}
+                            </span>
+                          </div>
 
-                    <div className="routine-copy">
-                      <strong>{routine.title}</strong>
-                      <span>
-                        {frequencyText(routine.frequency)} · {reminderText(routine.reminder)}
-                      </span>
-                    </div>
+                          <button
+                            className="ghost-button tiny-button progress-edit-button"
+                            onClick={() => startEditRoutine(routine)}
+                          >
+                            Tune
+                          </button>
+                        </div>
 
-                    <div className="row-actions">
-                      <button className="tiny-button" onClick={() => startEditRoutine(routine)}>
-                        편집
-                      </button>
-                    </div>
+                        <div className="progress-routine-meta">
+                          <strong>{formatProgressLabel(routine, sliderValue)}</strong>
+                          <span>{progressPercent}% 달성</span>
+                        </div>
+
+                        <input
+                          aria-label={`${routine.title} 진행률`}
+                          className="progress-slider"
+                          type="range"
+                          min={0}
+                          max={routine.targetValue ?? 100}
+                          step={routine.stepValue ?? 1}
+                          value={sliderValue}
+                          onChange={(event) =>
+                            setProgressDrafts((current) => ({
+                              ...current,
+                              [draftKey]: Number(event.target.value),
+                            }))
+                          }
+                          onPointerUp={(event) =>
+                            void persistRoutineProgress(routine, todayKey, Number(event.currentTarget.value))
+                          }
+                          onKeyUp={(event) =>
+                            void persistRoutineProgress(routine, todayKey, Number(event.currentTarget.value))
+                          }
+                          style={
+                            {
+                              "--accent": routine.accent,
+                              "--progress": `${progressPercent}%`,
+                            } as CSSProperties
+                          }
+                        />
+
+                      </>
+                    ) : (
+                      <>
+                        <input
+                          aria-label={`${routine.title} 완료 상태 토글`}
+                          checked={completed}
+                          className="check-toggle"
+                          onChange={() => persistRoutineToggle(routine.id, todayKey)}
+                          style={{ accentColor: routine.accent } as CSSProperties}
+                          type="checkbox"
+                        />
+
+                        <div className="routine-copy">
+                          <strong>{routine.title}</strong>
+                          <span>
+                            {frequencyText(routine.frequency)} · {reminderText(routine.reminder)}
+                          </span>
+                        </div>
+
+                        <div className="row-actions">
+                          <button className="tiny-button" onClick={() => startEditRoutine(routine)}>
+                            Tune
+                          </button>
+                        </div>
+                      </>
+                    )}
                   </article>
                 );
               })
@@ -1591,7 +2142,7 @@ function App() {
       <div className="screen-stack">
         <section className="panel block-panel">
           <div className="section-head">
-            <h2>주간 체크</h2>
+            <h2>Orbit Grid</h2>
             <span className="tag-pill">
               {weekDays[0].dateLabel} - {weekDays[6].dateLabel}
             </span>
@@ -1610,7 +2161,13 @@ function App() {
               {routines.map((routine) => (
                 <Fragment key={routine.id}>
                   <button className="grid-label" onClick={() => startEditRoutine(routine)}>
-                    <span className="grid-dot" style={{ background: routine.accent }} />
+                    <PlanetBadge
+                      accent={routine.accent}
+                      intense={routine.type === "progress"}
+                      ringed={routine.type === "progress"}
+                      size="label"
+                      variant={planetVariantForSeed(`${routine.id}:${routine.type}`)}
+                    />
                     <div>
                       <strong>{routine.title}</strong>
                     </div>
@@ -1619,6 +2176,25 @@ function App() {
                   {weekDays.map((day) => {
                     const checked = completedDateSets.get(routine.id)?.has(day.key) ?? false;
                     const enabled = isScheduledOnWeekday(routine, day.weekdayIndex);
+                    const progressValue = getProgressEntryValue(
+                      routine,
+                      day.key,
+                      progressEntryMaps.get(routine.id),
+                    );
+                    const progressLevel = getProgressCellLevel(
+                      getRoutineProgressPercent(routine, progressValue),
+                    );
+
+                    if (isProgressRoutine(routine)) {
+                      return (
+                        <div
+                          key={`${routine.id}-${day.key}`}
+                          className={`grid-cell ${enabled ? "grid-cell-enabled" : "grid-cell-disabled"} grid-cell-progress-${enabled && progressLevel === 3 ? 3 : 0}`}
+                          style={{ "--accent": routine.accent } as CSSProperties}
+                        />
+                      );
+                    }
+
                     return (
                       <button
                         key={`${routine.id}-${day.key}`}
@@ -1646,55 +2222,55 @@ function App() {
       <div className="screen-stack">
         <section className="panel block-panel">
           <div className="section-head">
-            <h2>뽀모도로</h2>
+            <h2>Burn Cycle</h2>
             <div className="segmented-group">
               <button
                 className={`segment-button ${timerPhase === "focus" ? "segment-button-active" : ""}`}
                 onClick={() => setTimerPhase("focus")}
               >
-                집중
+                Focus Burn
               </button>
               <button
                 className={`segment-button ${timerPhase === "break" ? "segment-button-active" : ""}`}
                 onClick={() => setTimerPhase("break")}
               >
-                휴식
+                Recovery Drift
               </button>
             </div>
           </div>
 
-          {!activeRoutine ? <p className="empty-copy">루틴을 먼저 만든 뒤 사용해 주세요.</p> : null}
+          {!activeRoutine ? <p className="empty-copy">Select a protocol before igniting the timer.</p> : null}
 
           <div className="timer-ring">
             <strong>{formatSeconds(remainingSeconds)}</strong>
-            <span>{timerPhase === "focus" ? "집중 시간" : "휴식 시간"}</span>
+            <span>{timerPhase === "focus" ? "Focus Burn" : "Recovery Drift"}</span>
           </div>
 
           <div className="button-row">
             <button className="primary-button" onClick={handleStartTimer} disabled={!activeRoutine}>
-              시작
+              Ignite
             </button>
             <button className="ghost-button" onClick={() => setIsTimerRunning(false)} disabled={!activeRoutine}>
-              일시정지
+              Hold
             </button>
             <button
               className="ghost-button"
               onClick={() => setRemainingSeconds(phaseMinutes * 60)}
               disabled={!activeRoutine}
             >
-              리셋
+              Reset
             </button>
           </div>
         </section>
 
         <section className="panel block-panel">
           <div className="section-head">
-            <h2>시간 설정</h2>
+            <h2>Cycle Timing</h2>
           </div>
 
           <div className="form-grid">
             <label className="mini-field">
-              <span>집중 시간</span>
+              <span>Focus Minutes</span>
               <input
                 type="number"
                 min={10}
@@ -1711,7 +2287,7 @@ function App() {
             </label>
 
             <label className="mini-field">
-              <span>휴식 시간</span>
+              <span>Recovery Minutes</span>
               <input
                 type="number"
                 min={5}
@@ -1739,10 +2315,10 @@ function App() {
               }
               disabled={!activeRoutine}
             >
-              리셋
+              Reset
             </button>
             <button className="primary-button" onClick={handleSaveTimer} disabled={!activeRoutine || isWorking}>
-              저장
+              Save
             </button>
           </div>
         </section>
@@ -1755,78 +2331,84 @@ function App() {
       <div className="screen-stack">
         <section className="summary-strip stats-strip">
           <article className="mini-card panel">
-            <span>이번 주 완료율</span>
+            <span>Weekly Yield</span>
             <strong>{weeklySummary.percent}%</strong>
           </article>
           <article className="mini-card panel">
-            <span>이번 달 완료율</span>
+            <span>Monthly Yield</span>
             <strong>{monthlySummary.percent}%</strong>
           </article>
           <article className="mini-card panel">
-            <span>최고 연속 기록</span>
-            <strong>{topStreak}일</strong>
+            <span>Top Streak</span>
+            <strong>{topStreak} cycles</strong>
           </article>
         </section>
 
         <section className="summary-strip">
           <article className="mini-card panel">
-            <span>이번 달 가장 잘 지킨 루틴</span>
-            <strong>{bestRoutineStat?.routine.title ?? "아직 없음"}</strong>
+            <span>Best Signal</span>
+            <strong>{bestRoutineStat?.routine.title ?? "No signal yet"}</strong>
             <p className="supporting stats-card-copy">
-              {bestRoutineStat ? `${bestRoutineStat.monthly.percent}% 완료` : "루틴을 만들면 바로 집계됩니다."}
+              {bestRoutineStat ? `${bestRoutineStat.monthly.percent}% complete` : "Create a protocol to start telemetry."}
             </p>
           </article>
           <article className="mini-card panel">
-            <span>더 챙기면 좋은 루틴</span>
-            <strong>{attentionRoutineStat?.routine.title ?? "아직 없음"}</strong>
+            <span>Needs Attention</span>
+            <strong>{attentionRoutineStat?.routine.title ?? "No signal yet"}</strong>
             <p className="supporting stats-card-copy">
               {attentionRoutineStat
-                ? `${attentionRoutineStat.monthly.percent}% 완료`
-                : "루틴을 만들면 바로 집계됩니다."}
+                ? `${attentionRoutineStat.monthly.percent}% complete`
+                : "Create a protocol to start telemetry."}
             </p>
           </article>
         </section>
 
         <section className="panel block-panel">
           <div className="section-head">
-            <h2>루틴별 현황</h2>
-            <span className="tag-pill">{`${now.getMonth() + 1}월 누적`}</span>
+            <h2>Protocol Telemetry</h2>
+            <span className="tag-pill">{`${now.getMonth() + 1} Month Log`}</span>
           </div>
 
           {routineStats.length === 0 ? (
-            <p className="empty-copy">통계를 보려면 먼저 루틴을 만들어 주세요.</p>
+            <p className="empty-copy">Create a protocol to light up telemetry.</p>
           ) : (
             <div className="stats-list">
               {routineStats.map((stat) => (
                 <article className="routine-stat-card" key={stat.routine.id}>
                   <div className="stat-card-head">
                     <div className="stat-title">
-                      <span className="grid-dot" style={{ background: stat.routine.accent }} />
+                      <PlanetBadge
+                        accent={stat.routine.accent}
+                        intense={stat.routine.type === "progress"}
+                        ringed={stat.routine.type === "progress"}
+                        size="label"
+                        variant={planetVariantForSeed(`${stat.routine.id}:${stat.routine.type}`)}
+                      />
                       <strong>{stat.routine.title}</strong>
                     </div>
-                    <span className="tag-pill">{`${stat.streak}일 연속`}</span>
+                    <span className="tag-pill">{`${stat.streak} cycle streak`}</span>
                   </div>
 
                   <div className="progress-block">
                     <div className="progress-meta">
-                      <span>주간</span>
+                      <span>Weekly</span>
                       <strong>{`${stat.weekly.completed}/${stat.weekly.scheduled || 0}`}</strong>
                     </div>
                     <div className="progress-track">
                       <div className="progress-fill" style={{ width: `${stat.weekly.percent}%`, background: stat.routine.accent }} />
                     </div>
-                    <span className="supporting">{`${stat.weekly.percent}% 완료`}</span>
+                    <span className="supporting">{`${stat.weekly.percent}% complete`}</span>
                   </div>
 
                   <div className="progress-block">
                     <div className="progress-meta">
-                      <span>월간</span>
+                      <span>Monthly</span>
                       <strong>{`${stat.monthly.completed}/${stat.monthly.scheduled || 0}`}</strong>
                     </div>
                     <div className="progress-track">
                       <div className="progress-fill" style={{ width: `${stat.monthly.percent}%`, background: stat.routine.accent }} />
                     </div>
-                    <span className="supporting">{`${stat.monthly.percent}% 완료`}</span>
+                    <span className="supporting">{`${stat.monthly.percent}% complete`}</span>
                   </div>
                 </article>
               ))}
@@ -1842,9 +2424,9 @@ function App() {
       <div className="screen-stack">
         <section className="panel block-panel">
           <div className="section-head">
-            <h2>루틴 목록</h2>
+            <h2>Protocol Deck</h2>
             <button className="ghost-button small-button" onClick={startCreateRoutine}>
-              새 루틴
+              Add Protocol
             </button>
           </div>
 
@@ -1855,10 +2437,20 @@ function App() {
                 key={routine.id}
                 onClick={() => startEditRoutine(routine)}
               >
-                <span className="routine-chip-dot" style={{ background: routine.accent }} />
+                <PlanetBadge
+                  accent={routine.accent}
+                  intense={routine.type === "progress"}
+                  ringed={routine.type === "progress"}
+                  size="chip"
+                  variant={planetVariantForSeed(`${routine.id}:${routine.type}`)}
+                />
                 <div>
                   <strong>{routine.title}</strong>
-                  <span>{frequencyText(routine.frequency)}</span>
+                  <span>
+                    {routine.type === "progress"
+                      ? `Progress Track · ${routine.targetValue ?? 0}${routine.unit ? ` ${routine.unit}` : ""}`
+                      : frequencyText(routine.frequency)}
+                  </span>
                 </div>
               </button>
             ))}
@@ -1867,40 +2459,86 @@ function App() {
 
         <section className="panel block-panel">
           <div className="section-head">
-            <h2>{isCreatingRoutine ? "새 루틴" : "루틴 수정"}</h2>
-            {!isCreatingRoutine && editorRoutineId ? (
-              <button className="danger-button small-button" onClick={handleDeleteRoutine} disabled={isWorking}>
-                삭제
+            <h2>{isCreatingRoutine ? "New Protocol" : "Tune Protocol"}</h2>
+            <div className="section-head-actions">
+              <button
+                className="ghost-button small-button"
+                onClick={() => (editorRoutine ? startEditRoutine(editorRoutine) : startCreateRoutine())}
+              >
+                Reset
               </button>
-            ) : null}
+              <button className="primary-button small-button" onClick={handleSaveRoutine} disabled={isWorking}>
+                {isCreatingRoutine ? "Create" : "Save"}
+              </button>
+              {!isCreatingRoutine && editorRoutineId ? (
+                <button className="danger-button small-button" onClick={handleDeleteRoutine} disabled={isWorking}>
+                  Delete
+                </button>
+              ) : null}
+            </div>
           </div>
 
           <div className="form-grid">
             <label className="mini-field">
-              <span>이름</span>
+              <span>Protocol Name</span>
               <input
                 value={draft.title}
                 onChange={(event) => setDraft((current) => ({ ...current, title: event.target.value }))}
-                placeholder="루틴 이름"
+                placeholder="Name this protocol"
               />
             </label>
 
             <label className="mini-field">
-              <span>알림 시간</span>
+              <span>Ping Window</span>
               <div className="time-toggle-row">
-                <input
-                  type="time"
-                  value={draft.reminder}
-                  disabled={!draft.reminder}
-                  onChange={(event) => setDraft((current) => ({ ...current, reminder: event.target.value }))}
-                />
+                <div className={`time-picker-shell ${draft.reminder ? "" : "time-picker-shell-disabled"}`}>
+                  <select
+                    aria-label="Reminder hour"
+                    className="time-picker-select"
+                    value={reminderControl.hour12}
+                    disabled={!draft.reminder}
+                    onChange={(event) => updateReminderControl({ hour12: Number(event.target.value) })}
+                  >
+                    {reminderHourOptions.map((hour) => (
+                      <option key={hour} value={hour}>
+                        {`${hour}`.padStart(2, "0")}
+                      </option>
+                    ))}
+                  </select>
+                  <span className="time-picker-divider">:</span>
+                  <select
+                    aria-label="Reminder minute"
+                    className="time-picker-select"
+                    value={reminderControl.minute}
+                    disabled={!draft.reminder}
+                    onChange={(event) => updateReminderControl({ minute: Number(event.target.value) })}
+                  >
+                    {reminderMinuteOptions.map((minute) => (
+                      <option key={minute} value={minute}>
+                        {`${minute}`.padStart(2, "0")}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    type="button"
+                    className={`meridiem-cycle-button ${draft.reminder ? "meridiem-cycle-button-active" : ""}`}
+                    disabled={!draft.reminder}
+                    onClick={() =>
+                      updateReminderControl({
+                        meridiem: reminderControl.meridiem === "AM" ? "PM" : "AM",
+                      })
+                    }
+                  >
+                    {reminderControl.meridiem}
+                  </button>
+                </div>
                 <button
                   type="button"
                   className={`switch-toggle ${draft.reminder ? "switch-toggle-active" : ""}`}
                   onClick={() =>
                     setDraft((current) => ({
                       ...current,
-                      reminder: current.reminder ? "" : current.reminder || "09:00",
+                      reminder: current.reminder ? "" : "00:00",
                     }))
                   }
                 >
@@ -1911,7 +2549,25 @@ function App() {
           </div>
 
           <div className="selector-block">
-            <span className="selector-label">반복 규칙</span>
+            <span className="selector-label">Protocol Type</span>
+            <div className="segmented-group">
+              <button
+                className={`segment-button ${draft.type === "check" ? "segment-button-active" : ""}`}
+                onClick={() => updateRoutineType("check")}
+              >
+                Binary Check
+              </button>
+              <button
+                className={`segment-button ${draft.type === "progress" ? "segment-button-active" : ""}`}
+                onClick={() => updateRoutineType("progress")}
+              >
+                Progress Track
+              </button>
+            </div>
+          </div>
+
+          <div className="selector-block">
+            <span className="selector-label">Cycle Pattern</span>
             <div className="segmented-group">
               {frequencyOptions.map((option) => (
                 <button
@@ -1925,9 +2581,54 @@ function App() {
             </div>
           </div>
 
+          {draft.type === "progress" ? (
+            <div className="progress-settings-card">
+              <div className="progress-settings-grid">
+                <label className="mini-field modern-field">
+                  <span>Target</span>
+                  <input
+                    type="number"
+                    min={1}
+                    step={1}
+                    value={draft.targetValue}
+                    onChange={(event) => setDraft((current) => ({ ...current, targetValue: event.target.value }))}
+                    placeholder="2000"
+                  />
+                </label>
+
+                <label className="mini-field modern-field">
+                  <span>Unit</span>
+                  <select
+                    value={draft.unit}
+                    onChange={(event) => setDraft((current) => ({ ...current, unit: event.target.value }))}
+                  >
+                    {!draft.unit ? <option value="">Select unit</option> : null}
+                    {progressUnitOptions.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                <label className="mini-field modern-field">
+                  <span>Slider Step</span>
+                  <input
+                    type="number"
+                    min={1}
+                    step={1}
+                    value={draft.stepValue}
+                    onChange={(event) => setDraft((current) => ({ ...current, stepValue: event.target.value }))}
+                    placeholder="250"
+                  />
+                </label>
+              </div>
+            </div>
+          ) : null}
+
           {draft.frequency === "CustomDays" ? (
             <div className="selector-block">
-              <span className="selector-label">요일 선택</span>
+              <span className="selector-label">Orbit Days</span>
               <div className="weekday-group">
                 {weekdayLabels.map((label, index) => (
                   <button
@@ -1948,33 +2649,42 @@ function App() {
           ) : null}
 
           <div className="selector-block">
-            <span className="selector-label">컬러</span>
+            <span className="selector-label">Planet Signature</span>
             <div className="color-grid">
               {colorOptions.map((option) => (
                 <button
-                  className={`color-button ${draft.accent === option.value ? "color-button-active" : ""}`}
+                  className={`color-button ${draft.accent === option.value ? "color-button-active" : ""} ${
+                    !isAccentAvailable(routines, option.value, isCreatingRoutine ? null : editorRoutineId) &&
+                    draft.accent !== option.value
+                      ? "color-button-disabled"
+                      : ""
+                  }`}
                   key={option.value}
                   aria-label={option.label}
+                  disabled={
+                    !isAccentAvailable(routines, option.value, isCreatingRoutine ? null : editorRoutineId) &&
+                    draft.accent !== option.value
+                  }
                   onClick={() => setDraft((current) => ({ ...current, accent: option.value }))}
-                  title={option.label}
+                  title={
+                    !isAccentAvailable(routines, option.value, isCreatingRoutine ? null : editorRoutineId) &&
+                    draft.accent !== option.value
+                      ? "Already assigned to another protocol"
+                      : option.label
+                  }
                 >
-                  <span className="color-swatch" style={{ background: option.value }} />
+                  <PlanetBadge
+                    accent={option.value}
+                    intense={draft.type === "progress" || draft.accent === option.value}
+                    ringed={draft.accent === option.value}
+                    size="swatch"
+                    variant={planetVariantForSeed(option.value)}
+                  />
                 </button>
               ))}
             </div>
           </div>
 
-          <div className="button-row">
-            <button
-              className="ghost-button"
-              onClick={() => (editorRoutine ? startEditRoutine(editorRoutine) : startCreateRoutine())}
-            >
-              리셋
-            </button>
-            <button className="primary-button" onClick={handleSaveRoutine} disabled={isWorking}>
-              {isCreatingRoutine ? "루틴 생성" : "저장"}
-            </button>
-          </div>
         </section>
       </div>
     );
@@ -1985,43 +2695,43 @@ function App() {
       <div className="screen-stack">
         <section className="summary-strip stats-strip">
           <article className="mini-card panel">
-            <span>대기 중 변경</span>
-            <strong>{snapshot.outboxCount}개</strong>
+            <span>Pending Uploads</span>
+            <strong>{snapshot.outboxCount}</strong>
             <p className="supporting stats-card-copy">
-              {snapshot.outboxCount > 0 ? "연결되면 자동으로 서버에 보냅니다." : "로컬과 서버가 같은 상태입니다."}
+              {snapshot.outboxCount > 0 ? "Queued for uplink when the channel opens." : "Local log and uplink are aligned."}
             </p>
           </article>
           <article className="mini-card panel">
-            <span>동기화 상태</span>
+            <span>Uplink Status</span>
             <strong>{syncStatusToneText(syncStatus.tone)}</strong>
             <p className="supporting stats-card-copy">{syncStatus.message}</p>
           </article>
           <article className="mini-card panel">
-            <span>마지막 동기화</span>
-            <strong>{snapshot.lastSyncAt ?? "아직 없음"}</strong>
-            <p className="supporting stats-card-copy">{isOnline ? "온라인" : "오프라인"}</p>
+            <span>Last Contact</span>
+            <strong>{snapshot.lastSyncAt ?? "No contact yet"}</strong>
+            <p className="supporting stats-card-copy">{isOnline ? "Online" : "Offline"}</p>
           </article>
         </section>
 
         <section className="panel block-panel">
           <div className="section-head">
-            <h2>동기화 서버</h2>
+            <h2>Uplink</h2>
             <div className="row-actions">
               <button className="ghost-button small-button" onClick={handleSaveServerUrl} disabled={isWorking}>
-                주소 저장
+                Save Endpoint
               </button>
               <button
                 className="primary-button small-button"
                 onClick={handleSyncNow}
                 disabled={isWorking || syncStatus.tone === "syncing"}
               >
-                지금 동기화
+                Sync Now
               </button>
             </div>
           </div>
 
           <label className="mini-field">
-            <span>서버 주소</span>
+            <span>Endpoint</span>
             <input
               value={serverUrlDraft}
               onChange={(event) => setServerUrlDraft(event.target.value)}
@@ -2032,22 +2742,22 @@ function App() {
           <div className="sync-state-card">
             <div className="sync-state-row">
               <span className={`status-pill status-pill-${syncStatus.tone}`}>{syncStatusToneText(syncStatus.tone)}</span>
-              <span className="supporting">{isOnline ? "자동 동기화 켜짐" : "오프라인 저장 중"}</span>
+              <span className="supporting">{isOnline ? "Auto uplink enabled" : "Storing offline logs"}</span>
             </div>
             <p className="supporting sync-state-copy">{syncStatus.message}</p>
 
             <div className="sync-stat-row">
               <div>
-                <span>업로드</span>
-                <strong>{syncStatus.pushedCount}건</strong>
+                <span>Uploaded</span>
+                <strong>{syncStatus.pushedCount}</strong>
               </div>
               <div>
-                <span>반영</span>
-                <strong>{syncStatus.pulledCount}건</strong>
+                <span>Applied</span>
+                <strong>{syncStatus.pulledCount}</strong>
               </div>
               <div>
-                <span>충돌</span>
-                <strong>{syncStatus.conflictCount}건</strong>
+                <span>Conflicts</span>
+                <strong>{syncStatus.conflictCount}</strong>
               </div>
             </div>
           </div>
@@ -2055,11 +2765,11 @@ function App() {
 
         <section className="panel block-panel">
           <div className="section-head">
-            <h2>알림</h2>
+            <h2>Alert Channel</h2>
             <span className="tag-pill">{notificationPermissionText(notificationPermission)}</span>
           </div>
 
-          <p className="supporting">루틴 리마인더와 뽀모도로 종료 알림에 사용합니다.</p>
+          <p className="supporting">Used for routine pings and burn-cycle alerts.</p>
 
           <div className="button-row">
             <button
@@ -2067,25 +2777,25 @@ function App() {
               onClick={handleRequestNotificationPermission}
               disabled={runtimeMode !== "native"}
             >
-              권한 요청
+              Request Access
             </button>
             <button className="primary-button" onClick={handleSendTestNotification} disabled={runtimeMode !== "native"}>
-              테스트 알림
+              Test Ping
             </button>
           </div>
         </section>
 
         <section className="panel block-panel">
           <div className="section-head">
-            <h2>동기화 키</h2>
+            <h2>Sync Key</h2>
             <button className="ghost-button small-button" onClick={handleRegenerate} disabled={isWorking}>
-              키 재생성
+              Rotate Key
             </button>
           </div>
 
           <div className="sync-key-card">
-            <span>현재 값</span>
-            <strong>{syncKey ?? "저장된 동기화 키가 있습니다."}</strong>
+            <span>Current Key</span>
+            <strong>{syncKey ?? "Stored on this device."}</strong>
           </div>
         </section>
       </div>
@@ -2115,8 +2825,9 @@ function App() {
     return (
       <main className="shell auth-shell">
         <section className="auth-card panel">
+          <div className="auth-kicker">MISSION LOG</div>
           <h1>Daily Check</h1>
-          <p className="supporting">로컬 저장소를 준비하고 있습니다.</p>
+          <p className="supporting">Warming the bridge and local archive.</p>
         </section>
       </main>
     );
@@ -2126,25 +2837,26 @@ function App() {
     return (
       <main className="shell auth-shell">
         <section className="auth-card panel">
+          <div className="auth-kicker">MISSION LOG</div>
           <h1>Daily Check</h1>
-          <p className="supporting">동기화 키를 입력해 앱을 시작하세요.</p>
+          <p className="supporting">Enter your sync key to reopen the bridge.</p>
 
           <label className="field">
-            <span>동기화 키</span>
+            <span>Sync Key</span>
             <input
               autoFocus
               value={inputValue}
               onChange={(event) => setInputValue(event.target.value)}
-              placeholder="원하는 값을 입력하세요"
+              placeholder="Enter your uplink key"
             />
           </label>
 
           <div className="button-row">
             <button className="primary-button" onClick={handleUnlock} disabled={isWorking}>
-              앱 시작
+              Enter Bridge
             </button>
             <button className="ghost-button" onClick={handleRegenerate} disabled={isWorking}>
-              키 재생성
+              Rotate Key
             </button>
           </div>
 
@@ -2158,14 +2870,21 @@ function App() {
     <main className="shell app-shell-wrap">
       <section className="app-shell panel">
         <header className="app-header">
-          <h1>{currentTabLabel}</h1>
+          <div className="app-header-meta">
+            <span className="mission-badge">HAIL MISSION</span>
+            <span className="mission-date">{missionDateLabel}</span>
+          </div>
+          <div className="app-title-block">
+            <h1>{currentTabLabel}</h1>
+            <p className="app-subtitle">{currentTabDescription}</p>
+          </div>
         </header>
 
         {actionMessage ? <div className="toast-banner">{actionMessage}</div> : null}
 
         <section className="screen-body">{renderCurrentScreen()}</section>
 
-        <nav className="tab-bar" aria-label="주요 메뉴" style={{ "--tab-count": tabs.length } as CSSProperties}>
+        <nav className="tab-bar" aria-label="Primary navigation" style={{ "--tab-count": tabs.length } as CSSProperties}>
           {tabs.map((tab) => {
             const active = tab.id === activeTab;
             return (
