@@ -14,6 +14,7 @@ It focuses on recurring routines, quick daily check-ins, progress-based habits, 
 - Run Pomodoro-style focus and recovery cycles
 - Use local notifications for routine reminders and timer completion
 - Work offline with local SQLite storage
+- Export and restore a full local archive as JSON
 - Sync across devices with `sync-server` and PostgreSQL when needed
 
 ## Mission UI
@@ -34,6 +35,7 @@ The current app UI uses:
 - `Burn Cycle`: focus and recovery timer
 - `Protocols`: create, edit, and tune routines
 - `Systems`: sync, alerts, and sync key controls
+- `Archive`: export or restore the local device archive from `Systems`
 
 ## Tech Stack
 
@@ -85,7 +87,8 @@ If you clone this repository on another local Mac and want to run it from source
 3. Install the Rust toolchain
 4. Install the Tauri macOS build prerequisites
 5. Install project dependencies
-6. Run the app in dev mode or build a DMG
+6. Install project dependencies
+7. Run the app in dev mode or build a DMG
 
 Example:
 
@@ -93,9 +96,11 @@ Example:
 git clone https://github.com/bluetoya/daily-check.git
 cd daily-check
 npm install
-npm --prefix sync-server install
 npm run tauri dev
 ```
+
+If you only want local storage on that Mac, you do not need `sync-server` or PostgreSQL.
+Only install and run `sync-server` when you want multi-device sync.
 
 If you only want to use the desktop app and do not need to develop it, downloading the DMG from GitHub Releases is the easier path.
 
@@ -170,6 +175,33 @@ Then in the app:
 - use manual or automatic sync from `Systems`
 
 See [sync-server/README.md](sync-server/README.md) for backend details.
+
+## Backup And Restore
+
+Daily Check is local-first. Every device keeps its own SQLite archive, and `Systems` includes a portable JSON backup flow.
+
+What backup includes:
+
+- all routines
+- binary completion history
+- progress routine values
+- sync key
+- sync endpoint
+- sound/alert preference
+
+How to use it:
+
+1. Open `Systems`
+2. Choose `Export Backup` to download a JSON archive
+3. Move that JSON file to another Mac if needed
+4. On the other device, open `Systems`
+5. Choose `Import Backup`
+
+Notes:
+
+- import replaces the current local archive on that device
+- backup is useful even if you do not use sync
+- after restore, local sync metadata is reset safely and can be re-uploaded if needed
 
 ## Notifications
 

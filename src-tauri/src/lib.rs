@@ -1,8 +1,8 @@
 mod db;
 
 use db::{
-    bootstrap_app, create_routine, delete_routine, regenerate_sync_key, sync_now,
-    toggle_routine_check, unlock_app, update_routine, update_routine_progress,
+    bootstrap_app, create_routine, delete_routine, export_backup, import_backup,
+    regenerate_sync_key, sync_now, toggle_routine_check, unlock_app, update_routine, update_routine_progress,
     update_routine_timer, update_sync_server_url, AppState,
 };
 use tauri::Manager;
@@ -82,6 +82,8 @@ pub fn run() {
             regenerate_sync_key,
             update_sync_server_url,
             sync_now,
+            export_backup,
+            import_backup,
             create_routine,
             update_routine,
             delete_routine,

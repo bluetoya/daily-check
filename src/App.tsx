@@ -8,7 +8,9 @@ import {
   sendNotification,
   type PermissionState,
 } from "@tauri-apps/plugin-notification";
-import { Fragment, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState, type CSSProperties, type ChangeEvent } from "react";
+import { TabIcon, PlanetBadge } from "./components/app-ui";
+import { downloadTextFile } from "./app/files";
 
 type Frequency = "Daily" | "Weekdays" | "Weekends" | "CustomDays";
 type RoutineType = "check" | "progress";
@@ -711,95 +713,6 @@ function buildFallbackSnapshot(anchorDate: Date): AppSnapshot {
   };
 }
 
-function TabIcon({ tab, active }: { tab: TabId; active: boolean }) {
-  const stroke = active ? "#17140f" : "#92a099";
-  const common = {
-    fill: "none",
-    stroke,
-    strokeWidth: 1.8,
-    strokeLinecap: "round" as const,
-    strokeLinejoin: "round" as const,
-  };
-
-  switch (tab) {
-    case "today":
-      return (
-        <svg viewBox="0 0 24 24" aria-hidden="true">
-          <path {...common} d="M4 10.5L12 4l8 6.5V20H4z" />
-          <path {...common} d="M9.5 20v-5h5v5" />
-        </svg>
-      );
-    case "weekly":
-      return (
-        <svg viewBox="0 0 24 24" aria-hidden="true">
-          <rect {...common} x="4" y="5" width="16" height="15" rx="3" />
-          <path {...common} d="M4 10h16M9.3 5v15M14.7 5v15" />
-        </svg>
-      );
-    case "stats":
-      return (
-        <svg viewBox="0 0 24 24" aria-hidden="true">
-          <path {...common} d="M6 18V11M12 18V7M18 18v-4" />
-          <path {...common} d="M4 18h16" />
-        </svg>
-      );
-    case "pomodoro":
-      return (
-        <svg viewBox="0 0 24 24" aria-hidden="true">
-          <path {...common} d="M9 4h6M8 7h8" />
-          <path {...common} d="M12 7c4 0 6.5 2.7 6.5 6.4S16 20 12 20s-6.5-2.9-6.5-6.6S8 7 12 7z" />
-          <path {...common} d="M12 10.2v3.3l2.2 1.5" />
-        </svg>
-      );
-    case "routines":
-      return (
-        <svg viewBox="0 0 24 24" aria-hidden="true">
-          <path {...common} d="M8 7h11M8 12h11M8 17h11" />
-          <path {...common} d="M4.5 7h.01M4.5 12h.01M4.5 17h.01" />
-        </svg>
-      );
-    case "settings":
-      return (
-        <svg viewBox="0 0 24 24" aria-hidden="true">
-          <path
-            {...common}
-            d="M12 4.8l1.7.5.9 1.7 1.9.4 1.4 1.4-.4 1.9 1 1.5-1 1.5.4 1.9-1.4 1.4-1.9.4-.9 1.7-1.7.5-1.7-.5-.9-1.7-1.9-.4-1.4-1.4.4-1.9-1-1.5 1-1.5-.4-1.9 1.4-1.4 1.9-.4.9-1.7z"
-          />
-          <circle {...common} cx="12" cy="12" r="3.1" />
-        </svg>
-      );
-    default:
-      return null;
-  }
-}
-
-function PlanetBadge({
-  accent,
-  size = "label",
-  ringed = false,
-  intense = false,
-  variant = "gas",
-}: {
-  accent: string;
-  size?: "label" | "chip" | "swatch";
-  ringed?: boolean;
-  intense?: boolean;
-  variant?: PlanetVariant;
-}) {
-  return (
-    <span
-      className={`planet-badge planet-badge-${size} ${ringed ? "planet-badge-ringed" : ""} ${
-        intense ? "planet-badge-intense" : ""
-      }`}
-      style={{ "--planet": accent } as CSSProperties}
-    >
-      <span className={`planet-badge-core planet-badge-variant-${variant}`}>
-        <span className="planet-badge-surface" />
-      </span>
-    </span>
-  );
-}
-
 function App() {
   const [snapshot, setSnapshot] = useState<AppSnapshot>(() => buildFallbackSnapshot(new Date()));
   const [runtimeMode, setRuntimeMode] = useState<"native" | "demo">("demo");
@@ -830,6 +743,7 @@ function App() {
   const [syncStatus, setSyncStatus] = useState<SyncStatus>(() => buildInitialSyncStatus());
   const [progressDrafts, setProgressDrafts] = useState<Record<string, number>>({});
   const syncInFlightRef = useRef(false);
+  const backupImportInputRef = useRef<HTMLInputElement | null>(null);
 
   const weekDays = useMemo(() => buildWeekDays(now), [now]);
   const monthDays = useMemo(() => buildMonthDays(now), [now]);
@@ -1484,6 +1398,93 @@ function App() {
       silent: !snapshot.soundEnabled,
     });
     setActionMessage("Test ping sent.");
+  }
+
+  async function handleExportBackup() {
+    const filename = `daily-check-backup-${toLocalDateKey(new Date())}.json`;
+
+    if (runtimeMode === "native") {
+      setIsWorking(true);
+      try {
+        const backupJson = await invoke<string>("export_backup");
+        downloadTextFile(filename, backupJson);
+        setActionMessage("Archive exported to JSON.");
+      } catch (error) {
+        setActionMessage(String(error));
+      } finally {
+        setIsWorking(false);
+      }
+      return;
+    }
+
+    const payload = JSON.stringify(
+      {
+        version: 1,
+        exportedAt: new Date().toISOString(),
+        syncKey,
+        soundEnabled: snapshot.soundEnabled,
+        syncServerUrl: snapshot.syncServerUrl,
+        routines: snapshot.routines,
+      },
+      null,
+      2,
+    );
+    downloadTextFile(filename, payload);
+    setActionMessage("Preview archive exported.");
+  }
+
+  function handleStartImportBackup() {
+    backupImportInputRef.current?.click();
+  }
+
+  async function handleImportBackup(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+
+    if (!file) {
+      return;
+    }
+
+    const shouldContinue = window.confirm(
+      "Importing a backup will replace the current local archive on this device. Continue?",
+    );
+    if (!shouldContinue) {
+      return;
+    }
+
+    try {
+      const contents = await file.text();
+
+      if (runtimeMode === "native") {
+        setIsWorking(true);
+        try {
+          const next = await invoke<AppSnapshot>("import_backup", { jsonInput: contents });
+          applySnapshot(next);
+          setActionMessage("Archive restored on this device.");
+        } finally {
+          setIsWorking(false);
+        }
+      } else {
+        const parsed = JSON.parse(contents) as {
+          syncKey?: string | null;
+          routines?: Routine[];
+          soundEnabled?: boolean;
+          syncServerUrl?: string;
+        };
+        applySnapshot({
+          hasSyncKey: Boolean(parsed.syncKey),
+          soundEnabled: parsed.soundEnabled ?? false,
+          outboxCount: 0,
+          syncServerUrl: parsed.syncServerUrl ?? snapshot.syncServerUrl,
+          lastSyncAt: null,
+          routines: parsed.routines ?? [],
+        });
+        setSyncKey(parsed.syncKey ?? null);
+        setActionMessage("Preview archive restored.");
+      }
+    } catch (error) {
+      setActionMessage(String(error));
+    }
   }
 
   async function persistRoutineToggle(routineId: string, date: string) {
@@ -2796,6 +2797,35 @@ function App() {
           <div className="sync-key-card">
             <span>Current Key</span>
             <strong>{syncKey ?? "Stored on this device."}</strong>
+          </div>
+        </section>
+
+        <section className="panel block-panel">
+          <div className="section-head">
+            <h2>Archive</h2>
+            <span className="tag-pill">Local backup</span>
+          </div>
+
+          <p className="supporting">
+            Export a portable JSON archive or restore this device from a previous backup. Import replaces the local
+            archive on this device.
+          </p>
+
+          <input
+            ref={backupImportInputRef}
+            className="hidden-file-input"
+            type="file"
+            accept="application/json"
+            onChange={handleImportBackup}
+          />
+
+          <div className="button-row">
+            <button className="ghost-button" onClick={handleExportBackup} disabled={isWorking}>
+              Export Backup
+            </button>
+            <button className="primary-button" onClick={handleStartImportBackup} disabled={isWorking}>
+              Import Backup
+            </button>
           </div>
         </section>
       </div>

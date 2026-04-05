@@ -25,14 +25,14 @@ pub struct AppState {
     pub db_path: PathBuf,
 }
 
-#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ProgressEntry {
     pub date: String,
     pub value: i64,
 }
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct RoutineRecord {
     pub id: String,
@@ -61,6 +61,17 @@ pub struct AppSnapshot {
     pub outbox_count: i64,
     pub sync_server_url: String,
     pub last_sync_at: Option<String>,
+    pub routines: Vec<RoutineRecord>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupPayload {
+    pub version: u32,
+    pub exported_at: String,
+    pub sync_key: Option<String>,
+    pub sound_enabled: bool,
+    pub sync_server_url: String,
     pub routines: Vec<RoutineRecord>,
 }
 
@@ -458,6 +469,26 @@ pub fn sync_now(state: State<AppState>) -> Result<SyncActionResponse, String> {
         pushed_count: execution.pushed_count,
         pulled_count: execution.pulled_count,
         conflict_count: execution.conflict_count,
+    })
+}
+
+#[tauri::command]
+pub fn export_backup(state: State<AppState>) -> Result<String, String> {
+    let conn = open_connection(&state.db_path).map_err(|error| error.to_string())?;
+    let payload = build_backup_payload(&conn).map_err(|error| error.to_string())?;
+    serde_json::to_string_pretty(&payload).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn import_backup(json_input: String, state: State<AppState>) -> Result<AppSnapshot, String> {
+    let payload: BackupPayload = serde_json::from_str(&json_input).map_err(|error| {
+        format!("백업 파일을 읽지 못했습니다. JSON 형식을 다시 확인해 주세요. ({error})")
+    })?;
+    let conn = open_connection(&state.db_path).map_err(|error| error.to_string())?;
+
+    with_write_transaction(&conn, |conn| {
+        restore_backup_payload(conn, payload.clone()).map_err(|error| error.to_string())?;
+        load_snapshot(conn).map_err(|error| error.to_string())
     })
 }
 
@@ -1382,6 +1413,136 @@ fn replace_local_snapshot(conn: &Connection, snapshot: &RemoteSnapshot) -> Resul
     Ok(())
 }
 
+fn build_backup_payload(conn: &Connection) -> Result<BackupPayload> {
+    let snapshot = load_snapshot(conn)?;
+
+    Ok(BackupPayload {
+        version: 1,
+        exported_at: timestamp_to_iso(current_timestamp()),
+        sync_key: get_setting(conn, "sync_key")?,
+        sound_enabled: snapshot.sound_enabled,
+        sync_server_url: snapshot.sync_server_url,
+        routines: snapshot.routines,
+    })
+}
+
+fn restore_backup_payload(conn: &Connection, payload: BackupPayload) -> Result<()> {
+    if payload.version != 1 {
+        return Err(anyhow::anyhow!("지원하지 않는 백업 버전입니다."));
+    }
+
+    conn.execute("DELETE FROM routine_checks", [])?;
+    conn.execute("DELETE FROM sync_outbox", [])?;
+    conn.execute("DELETE FROM routines", [])?;
+
+    let normalized_server_url = normalize_server_url(&payload.sync_server_url)
+        .unwrap_or_else(|_| DEFAULT_SYNC_SERVER_URL.to_string());
+
+    set_setting(
+        conn,
+        "sound_enabled",
+        if payload.sound_enabled { "true" } else { "false" },
+    )?;
+    set_setting(conn, "sync_server_url", &normalized_server_url)?;
+    delete_setting(conn, "server_cursor")?;
+    delete_setting(conn, "last_sync_at")?;
+
+    match payload.sync_key.map(|value| value.trim().to_string()) {
+        Some(sync_key) if !sync_key.is_empty() => set_setting(conn, "sync_key", &sync_key)?,
+        _ => delete_setting(conn, "sync_key")?,
+    }
+
+    let now = current_timestamp();
+    for routine in payload.routines {
+        let input = sanitize_routine_input(RoutineInput {
+            title: routine.title.clone(),
+            routine_type: routine.routine_type.clone(),
+            frequency: routine.frequency.clone(),
+            weekday_mask: routine.weekday_mask.clone(),
+            reminder: routine.reminder.clone(),
+            accent: routine.accent.clone(),
+            target_value: routine.target_value,
+            unit: routine.unit.clone(),
+            step_value: routine.step_value,
+            quick_adjust_values: routine.quick_adjust_values.clone(),
+        })
+        .map_err(anyhow::Error::msg)?;
+
+        conn.execute(
+            "INSERT INTO routines (
+         id, title, type, frequency, monthly_day, weekday_mask, reminder, focus_minutes, break_minutes,
+         accent, target_value, unit, step_value, quick_adjust_values, is_active, created_at, updated_at, deleted_at
+       ) VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 1, ?14, ?14, NULL)",
+            params![
+                routine.id,
+                input.title,
+                input.routine_type,
+                input.frequency,
+                input.weekday_mask,
+                input.reminder,
+                routine.focus_minutes.max(1),
+                routine.break_minutes.max(1),
+                input.accent,
+                input.target_value,
+                input.unit,
+                input.step_value,
+                encode_quick_adjust_values(&input.quick_adjust_values),
+                now
+            ],
+        )?;
+
+        let target_value = input.target_value.unwrap_or(DEFAULT_PROGRESS_TARGET);
+        let mut day_records = HashMap::<String, (bool, Option<i64>)>::new();
+
+        for completed_date in routine.completed_dates {
+            let fallback_progress = if input.routine_type == "progress" {
+                Some(target_value)
+            } else {
+                None
+            };
+
+            day_records
+                .entry(completed_date)
+                .and_modify(|entry| {
+                    entry.0 = true;
+                    if entry.1.is_none() {
+                        entry.1 = fallback_progress;
+                    }
+                })
+                .or_insert((true, fallback_progress));
+        }
+
+        for progress_entry in routine.progress_entries {
+            let is_completed = progress_entry.value >= target_value;
+            day_records
+                .entry(progress_entry.date)
+                .and_modify(|entry| {
+                    entry.0 = entry.0 || is_completed;
+                    entry.1 = Some(entry.1.unwrap_or(0).max(progress_entry.value));
+                })
+                .or_insert((is_completed, Some(progress_entry.value)));
+        }
+
+        for (date, (completed, progress_value)) in day_records {
+            if !completed && progress_value.unwrap_or(0) <= 0 {
+                continue;
+            }
+
+            conn.execute(
+                "INSERT INTO routine_checks (routine_id, check_date, completed, progress_value, updated_at)
+           VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![routine.id, date, completed, progress_value, now],
+            )?;
+        }
+    }
+
+    if get_setting(conn, "sync_key")?.is_some() {
+        ensure_outbox_has_local_snapshot(conn)?;
+    }
+
+    Ok(())
+}
+
 fn clear_outbox(conn: &Connection) -> Result<()> {
     conn.execute("DELETE FROM sync_outbox", [])?;
     Ok(())
@@ -2144,6 +2305,69 @@ mod tests {
             vec!["2026-03-30".to_string()]
         );
         assert_eq!(pending_outbox_count(&conn), 3);
+    }
+
+    #[test]
+    fn backup_roundtrip_restores_progress_and_sync_settings() {
+        let source_db = TestDb::new();
+        let source_conn = source_db.connection().expect("source db init");
+        reset_local_test_state(&source_conn).expect("reset source");
+
+        insert_progress_routine_event(
+            &source_conn,
+            "water-progress",
+            "물 마시기",
+            2_000,
+            "ml",
+            250,
+            1_710_000_050,
+        )
+        .expect("create progress routine");
+        update_progress_event(&source_conn, "water-progress", "2026-03-30", 1_500, 1_710_000_051)
+            .expect("partial progress");
+        update_progress_event(&source_conn, "water-progress", "2026-03-31", 2_000, 1_710_000_052)
+            .expect("completion date");
+        set_setting(&source_conn, "sync_key", "DC-BACKUP-TEST").expect("seed sync key");
+        set_setting(&source_conn, "sound_enabled", "true").expect("seed sound");
+        set_setting(&source_conn, "sync_server_url", "https://sync.example.com")
+            .expect("seed server url");
+
+        let backup = build_backup_payload(&source_conn).expect("build backup");
+
+        let restored_db = TestDb::new();
+        let restored_conn = restored_db.connection().expect("restored db init");
+        reset_local_test_state(&restored_conn).expect("reset restored");
+        restore_backup_payload(&restored_conn, backup).expect("restore backup");
+
+        let restored_snapshot = load_snapshot(&restored_conn).expect("load restored snapshot");
+        assert_eq!(
+            get_setting(&restored_conn, "sync_key").expect("read sync key"),
+            Some("DC-BACKUP-TEST".into())
+        );
+        assert_eq!(
+            get_setting(&restored_conn, "sound_enabled").expect("read sound"),
+            Some("true".into())
+        );
+        assert_eq!(restored_snapshot.sync_server_url, "https://sync.example.com");
+        assert_eq!(restored_snapshot.routines.len(), 1);
+        assert_eq!(
+            restored_snapshot.routines[0].progress_entries,
+            vec![
+                ProgressEntry {
+                    date: "2026-03-30".into(),
+                    value: 1500
+                },
+                ProgressEntry {
+                    date: "2026-03-31".into(),
+                    value: 2000
+                }
+            ]
+        );
+        assert_eq!(
+            restored_snapshot.routines[0].completed_dates,
+            vec!["2026-03-31".to_string()]
+        );
+        assert!(pending_outbox_count(&restored_conn) > 0);
     }
 
     #[test]
