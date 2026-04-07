@@ -176,6 +176,44 @@ Then in the app:
 
 See [sync-server/README.md](sync-server/README.md) for backend details.
 
+### Where To Run Sync
+
+Daily Check always writes to local SQLite first. `sync-server` and PostgreSQL are only needed when you want multiple devices to stay aligned.
+
+The important rule is:
+
+- Docker does **not** keep sync alive by itself
+- the machine or cloud instance running Docker must still stay powered on
+
+Practical options:
+
+1. Your own local MacBook
+   - easiest for development
+   - sync stops when that MacBook sleeps or shuts down
+   - good for testing, not ideal for daily multi-device use
+
+2. Always-on personal hardware
+   - Mac mini, NAS, home server, Raspberry Pi, or another machine that stays on
+   - good fit for private long-running sync
+   - Docker works well here
+
+3. Cloud host
+   - VPS, Fly.io, Render, or similar
+   - best option if you want sync available all the time from any machine
+   - recommended when you start relying on sync every day
+
+If you only want to use the app on one machine, skip sync entirely and stay local-only.
+
+Notes:
+
+- keep PostgreSQL private behind the sync service
+- point the app to the sync service URL, not directly to PostgreSQL
+- if you use GitHub auto-deploys, keep secret values in the host environment, not in the repository
+
+Official references:
+
+- PostgreSQL official docs: https://www.postgresql.org/docs/
+
 ## Backup And Restore
 
 Daily Check is local-first. Every device keeps its own SQLite archive, and `Systems` includes a portable JSON backup flow.

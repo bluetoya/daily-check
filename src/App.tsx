@@ -1932,44 +1932,58 @@ function App() {
               <span>{progressPercent}% 달성</span>
             </div>
 
-            <input
-              aria-label={`${routine.title} 진행률`}
-              className="progress-slider"
-              type="range"
-              min={0}
-              max={routine.targetValue ?? 100}
-              step={routine.stepValue ?? 1}
-              value={sliderValue}
-              onChange={(event) =>
-                setProgressDrafts((current) => ({
-                  ...current,
-                  [draftKey]: Number(event.target.value),
-                }))
-              }
-              onPointerUp={(event) =>
-                void persistRoutineProgress(routine, todayKey, Number(event.currentTarget.value))
-              }
-              onKeyUp={(event) =>
-                void persistRoutineProgress(routine, todayKey, Number(event.currentTarget.value))
-              }
+            <div
+              className="comet-track-shell"
               style={
                 {
                   "--accent": routine.accent,
                   "--progress": `${progressPercent}%`,
                 } as CSSProperties
               }
-            />
+            >
+              <div className="comet-track-line" aria-hidden="true">
+                <span className="comet-track-glow" />
+                <span className="comet-track-core" />
+                <span className="comet-track-particles comet-track-particles-near" />
+                <span className="comet-track-particles comet-track-particles-far" />
+              </div>
+              <input
+                aria-label={`${routine.title} 진행률`}
+                className="progress-slider comet-slider"
+                type="range"
+                min={0}
+                max={routine.targetValue ?? 100}
+                step={routine.stepValue ?? 1}
+                value={sliderValue}
+                onChange={(event) =>
+                  setProgressDrafts((current) => ({
+                    ...current,
+                    [draftKey]: Number(event.target.value),
+                  }))
+                }
+                onPointerUp={(event) =>
+                  void persistRoutineProgress(routine, todayKey, Number(event.currentTarget.value))
+                }
+                onKeyUp={(event) =>
+                  void persistRoutineProgress(routine, todayKey, Number(event.currentTarget.value))
+                }
+              />
+            </div>
           </>
         ) : (
           <>
-            <input
+            <button
               aria-label={`${routine.title} 완료 상태 토글`}
-              checked={completed}
-              className="check-toggle"
-              onChange={() => persistRoutineToggle(routine.id, todayKey)}
-              style={{ accentColor: routine.accent } as CSSProperties}
-              type="checkbox"
-            />
+              aria-pressed={completed}
+              className={`beacon-toggle ${completed ? "beacon-toggle-active" : ""}`}
+              onClick={() => persistRoutineToggle(routine.id, todayKey)}
+              style={{ "--accent": routine.accent } as CSSProperties}
+              type="button"
+            >
+              <span className="beacon-toggle-wave beacon-toggle-wave-1" />
+              <span className="beacon-toggle-wave beacon-toggle-wave-2" />
+              <span className="beacon-toggle-core" />
+            </button>
 
             <div className="routine-copy">
               <strong>{routine.title}</strong>
@@ -2008,15 +2022,27 @@ function App() {
   function renderTodayScreen() {
     return (
       <div className="screen-stack">
-        <section className="summary-strip">
-          <article className="mini-card panel">
-            <span>Mission Yield</span>
-            <strong>{todayCompletion}%</strong>
-          </article>
-          <article className="mini-card panel">
-            <span>Assigned Protocols</span>
-            <strong>{todayRoutines.length}</strong>
-          </article>
+        <section className="mission-hero panel">
+          <div className="mission-hero-copy">
+            <h2>Mission Queue</h2>
+            <p className="mission-hero-copytext">
+              Keep the bridge steady and clear today&apos;s live protocols before the next burn window.
+            </p>
+            <div className="mission-hero-stats">
+              <div className="hero-chip">
+                <span>Orbit Yield</span>
+                <strong>{todayCompletion}%</strong>
+              </div>
+              <div className="hero-chip">
+                <span>Live Protocols</span>
+                <strong>{todayRoutines.length}</strong>
+              </div>
+              <div className="hero-chip hero-chip-accent">
+                <span>Signal State</span>
+                <strong>{isOnline ? "Nominal" : "Offline"}</strong>
+              </div>
+            </div>
+          </div>
         </section>
 
         <section className="panel block-panel">
@@ -2027,111 +2053,14 @@ function App() {
             </button>
           </div>
 
-          {todayRoutines.length > 0 ? (
+          {todayRoutines.length === 0 ? (
+            <p className="empty-copy">No protocols scheduled for this cycle.</p>
+          ) : (
             <div className="today-routine-groups">
               {renderTodayRoutineGroup("Binary Checks", todayCheckRoutines)}
               {renderTodayRoutineGroup("Progress Tracks", todayProgressRoutines)}
             </div>
-          ) : null}
-
-          <div className="routine-list">
-            {todayRoutines.length === 0 ? (
-              <p className="empty-copy">No protocols scheduled for this cycle.</p>
-            ) : (
-              todayRoutines.map((routine) => {
-                const completed = completedDateSets.get(routine.id)?.has(todayKey) ?? false;
-                const draftKey = `${routine.id}:${todayKey}`;
-                const sliderValue =
-                  progressDrafts[draftKey] ??
-                  getProgressEntryValue(routine, todayKey, progressEntryMaps.get(routine.id));
-                const progressPercent = getRoutineProgressPercent(routine, sliderValue);
-                return (
-                  <article
-                    className={`routine-card ${isProgressRoutine(routine) ? "progress-routine-card" : ""}`}
-                    key={routine.id}
-                  >
-                    {isProgressRoutine(routine) ? (
-                      <>
-                        <div className="progress-routine-head">
-                          <div className="routine-copy progress-routine-copy">
-                            <strong>{routine.title}</strong>
-                            <span>
-                              {frequencyText(routine.frequency)} · {reminderText(routine.reminder)}
-                            </span>
-                          </div>
-
-                          <button
-                            className="ghost-button tiny-button progress-edit-button"
-                            onClick={() => startEditRoutine(routine)}
-                          >
-                            Tune
-                          </button>
-                        </div>
-
-                        <div className="progress-routine-meta">
-                          <strong>{formatProgressLabel(routine, sliderValue)}</strong>
-                          <span>{progressPercent}% 달성</span>
-                        </div>
-
-                        <input
-                          aria-label={`${routine.title} 진행률`}
-                          className="progress-slider"
-                          type="range"
-                          min={0}
-                          max={routine.targetValue ?? 100}
-                          step={routine.stepValue ?? 1}
-                          value={sliderValue}
-                          onChange={(event) =>
-                            setProgressDrafts((current) => ({
-                              ...current,
-                              [draftKey]: Number(event.target.value),
-                            }))
-                          }
-                          onPointerUp={(event) =>
-                            void persistRoutineProgress(routine, todayKey, Number(event.currentTarget.value))
-                          }
-                          onKeyUp={(event) =>
-                            void persistRoutineProgress(routine, todayKey, Number(event.currentTarget.value))
-                          }
-                          style={
-                            {
-                              "--accent": routine.accent,
-                              "--progress": `${progressPercent}%`,
-                            } as CSSProperties
-                          }
-                        />
-
-                      </>
-                    ) : (
-                      <>
-                        <input
-                          aria-label={`${routine.title} 완료 상태 토글`}
-                          checked={completed}
-                          className="check-toggle"
-                          onChange={() => persistRoutineToggle(routine.id, todayKey)}
-                          style={{ accentColor: routine.accent } as CSSProperties}
-                          type="checkbox"
-                        />
-
-                        <div className="routine-copy">
-                          <strong>{routine.title}</strong>
-                          <span>
-                            {frequencyText(routine.frequency)} · {reminderText(routine.reminder)}
-                          </span>
-                        </div>
-
-                        <div className="row-actions">
-                          <button className="tiny-button" onClick={() => startEditRoutine(routine)}>
-                            Tune
-                          </button>
-                        </div>
-                      </>
-                    )}
-                  </article>
-                );
-              })
-            )}
-          </div>
+          )}
         </section>
 
       </div>
@@ -2899,14 +2828,18 @@ function App() {
   return (
     <main className="shell app-shell-wrap">
       <section className="app-shell panel">
+        <div className="shell-decor shell-decor-top" aria-hidden="true" />
+        <div className="shell-decor shell-decor-bottom" aria-hidden="true" />
         <header className="app-header">
-          <div className="app-header-meta">
-            <span className="mission-badge">HAIL MISSION</span>
-            <span className="mission-date">{missionDateLabel}</span>
-          </div>
-          <div className="app-title-block">
-            <h1>{currentTabLabel}</h1>
-            <p className="app-subtitle">{currentTabDescription}</p>
+          <div className="app-header-copy">
+            <div className="app-header-meta">
+              <span className="mission-badge">DEEP SPACE LOG</span>
+              <span className="mission-date">{missionDateLabel}</span>
+            </div>
+            <div className="app-title-block">
+              <h1>{currentTabLabel}</h1>
+              <p className="app-subtitle">{currentTabDescription}</p>
+            </div>
           </div>
         </header>
 
